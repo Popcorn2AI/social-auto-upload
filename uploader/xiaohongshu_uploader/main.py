@@ -20,6 +20,7 @@ from utils.login_qrcode import print_terminal_qrcode
 from utils.login_qrcode import remove_qrcode_file
 from utils.login_qrcode import save_data_url_image
 from utils.log import xiaohongshu_logger
+from utils.popcorn_events import emit_checkpoint, emit_result
 
 XHS_DEFAULT_CREATOR_BASE_URL = "https://creator.xiaohongshu.com"
 XHS_CREATOR_BASE_URL_ENV = "SAU_XHS_CREATOR_BASE_URL"
@@ -472,9 +473,11 @@ class XiaoHongShuBaseUploader(BaseVideoUploader):
         流程（对应 codegen 录制）：
           点「添加内容类型声明」→ 点包含「来源转载」的 div
           → 填 placeholder「请输入媒体名称」→ 点 button「确认」。
-        容错：任一步失败记 warning 跳过、继续发布，不中断。
+        仅调用方显式提供来源时设置；任一步失败都中断当前发布目标。
         """
         source = getattr(self, "repost_source", "") or ""
+        if not source.strip():
+            return
         try:
             # 1. 点「添加内容类型声明」
             trigger = page.get_by_text("添加内容类型声明", exact=False).first
@@ -514,11 +517,11 @@ class XiaoHongShuBaseUploader(BaseVideoUploader):
             await page.wait_for_timeout(1000)
             xiaohongshu_logger.success(_msg("🧾", f"来源转载已声明（来源：{source}）"))
         except Exception as exc:
-            xiaohongshu_logger.warning(_msg("⚠️", f"设置来源转载失败，跳过继续发布: {exc}"))
             try:
                 await page.keyboard.press("Escape")
             except Exception:
                 pass
+            raise RuntimeError(f"来源转载声明设置失败: {exc}") from exc
 
 
 class XiaoHongShuVideo(XiaoHongShuBaseUploader):
@@ -534,6 +537,7 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
         publish_strategy: str = XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        repost_source: str | None = None,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -547,6 +551,7 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
         self.tags = tags or []
         self.thumbnail_path = thumbnail_path
         self.desc = desc or ""
+        self.repost_source = repost_source.strip() if repost_source and repost_source.strip() else ""
 
     async def validate_upload_args(self):
         await self.validate_base_args()
@@ -630,7 +635,7 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
         await page.wait_for_url(publish_url)
         await page.locator("div[class^='upload-content'] input[class='upload-input']").set_input_files(self.file_path)
 
-        while True:
+        for _attempt in range(300):
             try:
                 upload_input = await page.wait_for_selector('input.upload-input', timeout=3000)
                 preview_new = await upload_input.query_selector(
@@ -667,6 +672,8 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
             except Exception as e:
                 xiaohongshu_logger.debug(_msg("😵", f"上传状态还没稳定下来，小人继续观察: {e}"))
             await asyncio.sleep(2)
+        else:
+            raise TimeoutError("等待小红书视频上传完成超时")
 
         xiaohongshu_logger.info(_msg("✍️", "小人开始填标题、描述和话题"))
         await self.fill_meta(page)
@@ -680,23 +687,30 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
         if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
             await self.set_schedule_time_xiaohongshu(page, self.publish_date)
 
-        while True:
+        submit_click_sent = False
+        for _attempt in range(120):
             try:
-                if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED:
-                    await page.locator('button:has-text("定时发布")').click()
-                else:
-                    await page.locator('button:has-text("发布")').click()
+                if not submit_click_sent:
+                    emit_checkpoint("submitting")
+                    if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED:
+                        await page.locator('button:has-text("定时发布")').click()
+                    else:
+                        await page.locator('button:has-text("发布")').click()
+                    submit_click_sent = True
                 await page.wait_for_url(
                     XHS_PUBLISH_SUCCESS_URL_PATTERN,
                     timeout=3000
                 )
                 xiaohongshu_logger.success(_msg("🥳", "视频发布成功，小人开心收工"))
+                emit_result("scheduled" if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED else "published")
                 break
             except Exception:
                 xiaohongshu_logger.info(_msg("🏃", "小人正在冲刺发布视频"))
                 if self.debug:
                     await page.screenshot(full_page=True)
                 await asyncio.sleep(0.5)
+        else:
+            raise TimeoutError("等待小红书视频发布结果超时")
 
     async def upload(self, playwright: Playwright) -> None:
         xiaohongshu_logger.info(_msg("🧍", "小人先检查 cookie、视频文件、封面和发布时间"))
@@ -739,6 +753,7 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
         publish_strategy: str = XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        repost_source: str | None = None,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -752,6 +767,7 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
         self.tags = tags or []
         self.desc = desc if desc is not None else self.note
         self.title = title or ((self.desc or self.note)[:20] if (self.desc or self.note) else "")
+        self.repost_source = repost_source.strip() if repost_source and repost_source.strip() else ""
 
     async def validate_upload_args(self):
         await self.validate_base_args()
@@ -785,7 +801,7 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
         xiaohongshu_logger.info(_msg("📤", "小人正在上传图片"))
         await upload_input.set_input_files(self.image_paths)
 
-        while True:
+        for _attempt in range(300):
             try:
                 title_container = page.locator('input[placeholder*="填写标题"]').first
                 await title_container.wait_for(state="visible", timeout=3000)
@@ -794,6 +810,8 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
             except Exception:
                 xiaohongshu_logger.debug(_msg("🧍", "图文素材还在上传，小人继续等一会"))
                 await asyncio.sleep(1)
+        else:
+            raise TimeoutError("等待小红书图文上传完成超时")
 
         xiaohongshu_logger.info(_msg("✍️", "小人开始填标题、描述和话题"))
         await self.fill_meta(page)
@@ -803,23 +821,30 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
         if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
             await self.set_schedule_time_xiaohongshu(page, self.publish_date)
 
-        while True:
+        submit_click_sent = False
+        for _attempt in range(120):
             try:
-                if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED:
-                    await page.locator('button:has-text("定时发布")').click()
-                else:
-                    await page.locator('button:has-text("发布")').click()
+                if not submit_click_sent:
+                    emit_checkpoint("submitting")
+                    if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED:
+                        await page.locator('button:has-text("定时发布")').click()
+                    else:
+                        await page.locator('button:has-text("发布")').click()
+                    submit_click_sent = True
                 await page.wait_for_url(
                     XHS_PUBLISH_SUCCESS_URL_PATTERN,
                     timeout=3000
                 )
                 xiaohongshu_logger.success(_msg("🥳", "图文发布成功，小人开心收工"))
+                emit_result("scheduled" if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED else "published")
                 break
             except Exception:
                 xiaohongshu_logger.info(_msg("🏃", "小人正在冲刺发布图文"))
                 if self.debug:
                     await page.screenshot(full_page=True)
                 await asyncio.sleep(0.5)
+        else:
+            raise TimeoutError("等待小红书图文发布结果超时")
 
     async def upload(self, playwright: Playwright) -> None:
         xiaohongshu_logger.info(_msg("🧍", "小人先检查 cookie、图片和发布时间"))

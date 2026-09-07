@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import uploader.xiaohongshu_uploader.main as xhs_main
 
@@ -243,7 +243,7 @@ class XiaohongshuUploaderTests(unittest.TestCase):
         self.assertIn(("type", "#话题1", 30), page.keyboard.actions)
         self.assertEqual(
             page.locators['#creator-editor-topic-container .item'].actions,
-            [("wait_for", {"state": "visible", "timeout": 2000}), ("click",)],
+            [("wait_for", {"state": "visible", "timeout": 4000}), ("click",)],
         )
 
     def test_video_fill_meta_can_fill_first_tag_without_desc(self):
@@ -278,6 +278,33 @@ class XiaohongshuUploaderTests(unittest.TestCase):
 
         self.assertEqual(app.title, "显式标题")
         self.assertEqual(app.desc, "图文正文")
+
+    def test_declaration_is_skipped_when_repost_source_is_not_explicit(self):
+        app = xhs_main.XiaoHongShuNote(
+            image_paths=["a.png"], note="正文", tags=[], publish_date=0,
+            account_file="account.json", title="标题",
+        )
+        page = AsyncMock()
+
+        asyncio.run(app.check_original_declaration(page))
+
+        page.get_by_text.assert_not_called()
+
+    def test_explicit_repost_declaration_failure_blocks_publish(self):
+        app = xhs_main.XiaoHongShuNote(
+            image_paths=["a.png"], note="正文", tags=[], publish_date=0,
+            account_file="account.json", title="标题", repost_source="媒体名称",
+        )
+        page = MagicMock()
+        trigger = MagicMock()
+        trigger.first = trigger
+        trigger.scroll_into_view_if_needed = AsyncMock()
+        trigger.click = AsyncMock(side_effect=RuntimeError("missing declaration control"))
+        page.get_by_text.return_value = trigger
+        page.keyboard.press = AsyncMock()
+
+        with self.assertRaisesRegex(RuntimeError, "来源转载声明设置失败"):
+            asyncio.run(app.check_original_declaration(page))
 
 
 if __name__ == "__main__":

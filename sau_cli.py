@@ -144,6 +144,7 @@ class XiaohongshuVideoUploadRequest:
     publish_strategy: str = XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE
     debug: bool = True
     headless: bool = True
+    repost_source: str | None = None
 
 
 @dataclass(slots=True)
@@ -157,6 +158,7 @@ class XiaohongshuNoteUploadRequest:
     publish_strategy: str = XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE
     debug: bool = True
     headless: bool = True
+    repost_source: str | None = None
 
 
 @dataclass(slots=True)
@@ -530,6 +532,7 @@ async def upload_xiaohongshu_video(request: XiaohongshuVideoUploadRequest) -> Pa
         publish_strategy=request.publish_strategy,
         debug=request.debug,
         headless=request.headless,
+        repost_source=request.repost_source,
     )
     await app.main()
     return account_file
@@ -554,6 +557,7 @@ async def upload_xiaohongshu_note(request: XiaohongshuNoteUploadRequest) -> Path
         publish_strategy=request.publish_strategy,
         debug=request.debug,
         headless=request.headless,
+        repost_source=request.repost_source,
     )
     await app.main()
     return account_file
@@ -882,6 +886,7 @@ def build_parser() -> argparse.ArgumentParser:
     xiaohongshu_upload_video_parser.add_argument("--tags", default="", help="Comma-separated tags, such as tag1,tag2")
     xiaohongshu_upload_video_parser.add_argument("--schedule", type=schedule_value, help=f"Schedule time in {schedule_help}")
     xiaohongshu_upload_video_parser.add_argument("--thumbnail", type=existing_file_path, help="Optional thumbnail path")
+    xiaohongshu_upload_video_parser.add_argument("--repost-source", help="Explicit source for the 来源转载 declaration")
     add_runtime_flags(xiaohongshu_upload_video_parser)
 
     xiaohongshu_upload_note_parser = xiaohongshu_actions.add_parser("upload-note", help="Upload one note to Xiaohongshu")
@@ -891,6 +896,7 @@ def build_parser() -> argparse.ArgumentParser:
     xiaohongshu_upload_note_parser.add_argument("--note", default="", help="Optional note content")
     xiaohongshu_upload_note_parser.add_argument("--tags", default="", help="Comma-separated tags, such as tag1,tag2")
     xiaohongshu_upload_note_parser.add_argument("--schedule", type=schedule_value, help=f"Schedule time in {schedule_help}")
+    xiaohongshu_upload_note_parser.add_argument("--repost-source", help="Explicit source for the 来源转载 declaration")
     add_runtime_flags(xiaohongshu_upload_note_parser)
 
     bilibili_parser = platform_parsers.add_parser("bilibili", help="Bilibili operations")
@@ -1187,6 +1193,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
+                repost_source=args.repost_source,
             )
             await upload_xiaohongshu_video(request)
             print(f"Xiaohongshu video upload submitted: {request.video_file}")
@@ -1207,6 +1214,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
+                repost_source=args.repost_source,
             )
             await upload_xiaohongshu_note(request)
             print(f"Xiaohongshu note upload submitted: {len(request.image_files)} images")

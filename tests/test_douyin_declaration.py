@@ -22,7 +22,7 @@ class DouyinDeclarationTests(unittest.TestCase):
     def test_legacy_positional_runtime_flags_keep_their_meaning(self):
         video = DouYinVideo(
             "标题", "/tmp/demo.mp4", [], 0, "/tmp/cookie.json",
-            None, "", "", None, "",
+            None, "", "", None, "", None,
             "scheduled", False, False,
         )
         self.assertEqual(video.publish_strategy, "scheduled")
@@ -66,10 +66,13 @@ class DouyinDeclarationTests(unittest.TestCase):
         video.apply_self_declaration = AsyncMock(side_effect=RuntimeError("抖音自主声明设置失败"))
 
         locator = MagicMock()
+        locator.first = locator
         locator.set_input_files = AsyncMock()
         locator.count = AsyncMock(return_value=1)
+        locator.wait_for = AsyncMock()
         page = MagicMock()
         page.goto = AsyncMock()
+        page.wait_for_timeout = AsyncMock()
         page.wait_for_url = AsyncMock()
         page.wait_for_selector = AsyncMock()
         page.locator.return_value = locator

@@ -2,6 +2,7 @@
 from datetime import datetime
 
 import asyncio
+from contextlib import suppress
 import inspect
 import os
 import sys
@@ -20,6 +21,7 @@ from utils.login_qrcode import print_terminal_qrcode
 from utils.login_qrcode import remove_qrcode_file
 from utils.login_qrcode import save_data_url_image
 from utils.log import douyin_logger
+from utils.popcorn_events import emit_checkpoint, emit_result
 
 DOUYIN_PUBLISH_STRATEGY_IMMEDIATE = "immediate"
 DOUYIN_PUBLISH_STRATEGY_SCHEDULED = "scheduled"
@@ -1001,7 +1003,7 @@ class DouYinVideo(DouYinBaseUploader):
         await upload_input.wait_for(state="attached", timeout=60000)
         await upload_input.set_input_files(self.file_path)
 
-        while True:
+        for _attempt in range(120):
             try:
                 await page.wait_for_url(
                     "https://creator.douyin.com/creator-micro/content/publish?enter_from=publish_page",
@@ -1020,13 +1022,15 @@ class DouYinVideo(DouYinBaseUploader):
                 except Exception:
                     douyin_logger.debug(_msg("🧍", "还没进到视频发布页面，小人继续等一会"))
                     await asyncio.sleep(0.5)
+        else:
+            raise TimeoutError("等待抖音视频发布页超时")
 
         await asyncio.sleep(1)
         douyin_logger.info(_msg("✍️", "小人开始填标题、描述和话题"))
         await self.fill_title_and_description(page, self.title, self.desc, self.tags)
         douyin_logger.info(_msg("🏷️", f"小人一共贴了 {len(self.tags)} 个话题"))
 
-        while True:
+        for _attempt in range(300):
             try:
                 number = await page.locator('[class^="long-card"] div:has-text("重新上传")').count()
                 if number > 0:
@@ -1040,17 +1044,24 @@ class DouYinVideo(DouYinBaseUploader):
             except Exception:
                 douyin_logger.debug(_msg("🧍", "小人还在等视频上传完成"))
                 await asyncio.sleep(2)
+        else:
+            raise TimeoutError("等待抖音视频上传完成超时")
 
         if self.productLink and self.productTitle:
             douyin_logger.info(_msg("🛒", "小人正在设置商品链接"))
             await self.set_product_link(page, self.productLink, self.productTitle)
             douyin_logger.info(_msg("🥳", "商品链接设置完成"))
 
-        # 自主声明：本项目成片含 AI 生成内容（TTS 配音 / AI 字幕 / AI 前贴片），
-        # 按平台合规如实选「内容由AI生成」（与转载等并列，单选，无二级选项、无需填来源）。
-        if not self.declaration:
-            self.declaration = "内容由AI生成"
-        await self.apply_self_declaration(page)
+        # 自主声明只采用调用方显式选择，不根据作品来源或流水线自动推断。
+        try:
+            await self.apply_self_declaration(page)
+        except Exception:
+            # 声明失败会阻断目标；同时确保 Playwright 资源不会残留在本地工作台。
+            with suppress(Exception):
+                await context.close()
+            with suppress(Exception):
+                await browser.close()
+            raise
 
         # 先归集：此时尚未打开封面弹窗，避免 dy-creator-content-portal 封面浮层拦截合集下拉
         # （实测：封面弹窗在 headless 下常滞留"检测中"未关闭，会盖住"添加合集"下拉）
@@ -1068,7 +1079,8 @@ class DouYinVideo(DouYinBaseUploader):
             await self.set_schedule_time_douyin(page, self.publish_date)
 
         sms_prompt_logged = False
-        while True:
+        submit_click_sent = False
+        for _attempt in range(120):
             try:
                 # 移除会拦截发布按钮点击的新手引导/话题下拉浮层
                 await page.evaluate(
@@ -1088,19 +1100,23 @@ class DouYinVideo(DouYinBaseUploader):
                     if code:
                         sms_prompt_logged = False
                         await self._submit_sms_verify_code(page, sms_input, code, code_file)
+                        submit_click_sent = False
                     elif not sms_prompt_logged:
                         douyin_logger.warning(_msg("⏳", f"等待验证码输入；可在交互终端直接输入，或写入文件: {code_file}"))
                         sms_prompt_logged = True
 
                 # ── 正常发布流程 ──
                 publish_button = page.get_by_role("button", name="发布", exact=True)
-                if await publish_button.count():
+                if await publish_button.count() and not submit_click_sent:
+                    emit_checkpoint("submitting")
                     await publish_button.click(force=True)
+                    submit_click_sent = True
                 await page.wait_for_url(
                     "https://creator.douyin.com/creator-micro/content/manage**",
                     timeout=3000,
                 )
                 douyin_logger.success(_msg("🥳", "视频发布成功，小人开心收工"))
+                emit_result("scheduled" if self.publish_strategy == DOUYIN_PUBLISH_STRATEGY_SCHEDULED else "published")
                 break
             except Exception:
                 await self.handle_auto_video_cover(page)
@@ -1108,6 +1124,8 @@ class DouYinVideo(DouYinBaseUploader):
                 if self.debug:
                     await page.screenshot(full_page=True)
                 await asyncio.sleep(0.5)
+        else:
+            raise TimeoutError("等待抖音视频发布结果超时")
 
         await context.storage_state(path=self.account_file)
         douyin_logger.success(_msg("🥳", "cookie 更新完毕"))
@@ -1185,7 +1203,7 @@ class DouYinNote(DouYinBaseUploader):
         douyin_logger.info(_msg("📤", "小人正在上传图片"))
         await page.locator("div[class^='container'] input[accept*='image']").set_input_files(self.image_paths)
 
-        while True:
+        for _attempt in range(300):
             try:
                 await page.wait_for_url(
                     "**/creator-micro/content/post/image?**",
@@ -1196,6 +1214,8 @@ class DouYinNote(DouYinBaseUploader):
             except Exception:
                 douyin_logger.debug(_msg("🧍", "小人还在等图片上传完成"))
                 await asyncio.sleep(0.5)
+        else:
+            raise TimeoutError("等待抖音图文上传完成超时")
 
         await asyncio.sleep(1)
         douyin_logger.info(_msg("✍️", "小人开始填标题、描述和话题"))
@@ -1212,20 +1232,26 @@ class DouYinNote(DouYinBaseUploader):
         if self.publish_strategy == DOUYIN_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
             await self.set_schedule_time_douyin(page, self.publish_date)
 
-        while True:
+        submit_click_sent = False
+        for _attempt in range(120):
             try:
                 publish_button = page.get_by_role("button", name="发布", exact=True)
-                if await publish_button.count():
+                if await publish_button.count() and not submit_click_sent:
+                    emit_checkpoint("submitting")
                     await publish_button.click()
+                    submit_click_sent = True
                 await page.wait_for_url(
                     "**/creator-micro/content/manage?enter_from=publish**",
                     timeout=3000,
                 )
                 douyin_logger.success(_msg("🥳", "图文发布成功，小人开心收工"))
+                emit_result("scheduled" if self.publish_strategy == DOUYIN_PUBLISH_STRATEGY_SCHEDULED else "published")
                 break
             except Exception:
                 douyin_logger.info(_msg("🏃", "小人正在冲刺发布图文"))
                 await asyncio.sleep(0.5)
+        else:
+            raise TimeoutError("等待抖音图文发布结果超时")
 
     async def upload(self, playwright: Playwright) -> None:
         douyin_logger.info(_msg("🧍", "小人先检查 cookie、图片和发布时间"))
