@@ -117,6 +117,7 @@ class KuaishouVideoUploadRequest:
     debug: bool = True
     headless: bool = True
     collection_name: str | None = None
+    declare_original: bool = False
 
 
 @dataclass(slots=True)
@@ -130,6 +131,7 @@ class KuaishouNoteUploadRequest:
     publish_strategy: str = KUAISHOU_PUBLISH_STRATEGY_IMMEDIATE
     debug: bool = True
     headless: bool = True
+    declare_original: bool = False
 
 
 @dataclass(slots=True)
@@ -191,6 +193,8 @@ class TencentVideoUploadRequest:
     debug: bool = True
     headless: bool = True
     collection_name: str | None = None
+    declare_original: bool = False
+    content_label: str | None = None
 
 
 @dataclass(slots=True)
@@ -485,6 +489,7 @@ async def upload_kuaishou_video(request: KuaishouVideoUploadRequest) -> Path:
         debug=request.debug,
         headless=request.headless,
         collection_name=request.collection_name,
+        declare_original=request.declare_original,
     )
     await app.main()
     return account_file
@@ -508,6 +513,7 @@ async def upload_kuaishou_note(request: KuaishouNoteUploadRequest) -> Path:
         publish_strategy=request.publish_strategy,
         debug=request.debug,
         headless=request.headless,
+        declare_original=request.declare_original,
     )
     await app.main()
     return account_file
@@ -625,6 +631,8 @@ async def upload_tencent_video(request: TencentVideoUploadRequest) -> Path:
         debug=request.debug,
         headless=request.headless,
         collection_name=request.collection_name,
+        declare_original=request.declare_original,
+        content_label=request.content_label,
     )
     await app.tencent_upload_video()
     return account_file
@@ -858,6 +866,7 @@ def build_parser() -> argparse.ArgumentParser:
     kuaishou_upload_video_parser.add_argument("--schedule", type=schedule_value, help=f"Schedule time in {schedule_help}")
     kuaishou_upload_video_parser.add_argument("--thumbnail", type=existing_file_path, help="Optional thumbnail path")
     kuaishou_upload_video_parser.add_argument("--collection", default=None, help="Optional collection name to add the work into (must already exist)")
+    kuaishou_upload_video_parser.add_argument("--declare-original", action="store_true", help="Explicitly declare this work as original")
     add_runtime_flags(kuaishou_upload_video_parser)
 
     kuaishou_upload_note_parser = kuaishou_actions.add_parser("upload-note", help="Upload one note to Kuaishou")
@@ -867,6 +876,7 @@ def build_parser() -> argparse.ArgumentParser:
     kuaishou_upload_note_parser.add_argument("--note", default="", help="Optional note content")
     kuaishou_upload_note_parser.add_argument("--tags", default="", help="Comma-separated tags, such as tag1,tag2")
     kuaishou_upload_note_parser.add_argument("--schedule", type=schedule_value, help=f"Schedule time in {schedule_help}")
+    kuaishou_upload_note_parser.add_argument("--declare-original", action="store_true", help="Explicitly declare this work as original")
     add_runtime_flags(kuaishou_upload_note_parser)
 
     xiaohongshu_parser = platform_parsers.add_parser("xiaohongshu", help="Xiaohongshu operations")
@@ -939,6 +949,8 @@ def build_parser() -> argparse.ArgumentParser:
     tencent_upload_video_parser.add_argument("--category", help="Optional original content category")
     tencent_upload_video_parser.add_argument("--draft", action="store_true", help="Save as draft instead of publishing")
     tencent_upload_video_parser.add_argument("--collection", default=None, help="Optional collection name to add the work into (must already exist)")
+    tencent_upload_video_parser.add_argument("--declare-original", action="store_true", help="Explicitly declare this work as original")
+    tencent_upload_video_parser.add_argument("--content-label", choices=["ai_generated"], help="Explicit WeChat Channels content label")
     add_runtime_flags(tencent_upload_video_parser)
 
     alipay_parser = platform_parsers.add_parser("alipay", help="Alipay life account operations")
@@ -1137,6 +1149,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 debug=args.debug,
                 headless=args.headless,
                 collection_name=args.collection,
+                declare_original=args.declare_original,
             )
             await upload_kuaishou_video(request)
             print(f"Kuaishou video upload submitted: {request.video_file}")
@@ -1153,6 +1166,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
+                declare_original=args.declare_original,
             )
             await upload_kuaishou_note(request)
             print(f"Kuaishou note upload submitted: {len(request.image_files)} images")
@@ -1285,6 +1299,8 @@ async def dispatch(args: argparse.Namespace) -> int:
                 debug=args.debug,
                 headless=args.headless,
                 collection_name=args.collection,
+                declare_original=args.declare_original,
+                content_label=args.content_label,
             )
             await upload_tencent_video(request)
             print(f"Tencent/WeChat Channels video upload submitted: {request.video_file}")

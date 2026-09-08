@@ -18,6 +18,7 @@ from conf import BASE_DIR, DEBUG_MODE, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
 from uploader.base_video import BaseVideoUploader
 from utils.base_social_media import set_init_script
 from utils.log import tencent_logger
+from utils.popcorn_events import emit_checkpoint, emit_result
 
 TENCENT_LOGIN_URL = "https://channels.weixin.qq.com"
 TENCENT_HOME_URL = "https://channels.weixin.qq.com/platform"
@@ -788,15 +789,29 @@ class TencentBaseUploader(BaseVideoUploader):
                 pass
 
     async def apply_original_statement(self, page: Page) -> None:
-        # 视频号「视频标注」下拉：本项目成片经 AI 处理（TTS 配音、AI 字幕、AI 前贴片），
-        # 依平台合规要求如实选「含AI生成内容」（与「内容为转载」等并列，选定即可、无需填写来源）。
-        # 注意：这与上方独立的「声明原创」复选框是两个不同字段，本项目走 AI 标注、不勾原创声明。
-        label_text = getattr(self, "content_label", None) or "含AI生成内容"
+        """Apply original declaration and content label as independent explicit choices."""
+        if getattr(self, "declare_original", False):
+            original = page.locator('label:has-text("声明原创")').first
+            if not await original.count():
+                original = page.get_by_text("声明原创", exact=True).first
+            if not await original.count():
+                raise RuntimeError("视频号原创声明设置失败：未找到声明原创入口")
+            await original.click(timeout=8000)
+            await page.wait_for_timeout(500)
+            tencent_logger.success(_msg("🥳", "已选择视频号原创声明"))
+
+        content_label = getattr(self, "content_label", None)
+        if content_label is None:
+            return
+        label_map = {"ai_generated": "含AI生成内容"}
+        label_text = label_map.get(content_label)
+        if label_text is None:
+            raise ValueError(f"不支持的视频号内容标注: {content_label}")
+
         try:
             entry = page.get_by_text("选择视频标注", exact=True).first
             if not await entry.count():
-                tencent_logger.info(_msg("🧾", "当前页面未发现「视频标注」入口，跳过标注继续发布"))
-                return
+                raise RuntimeError("未找到视频标注入口")
             await entry.click()
             await page.wait_for_timeout(800)
             option = page.get_by_text(label_text, exact=True).first
@@ -805,7 +820,7 @@ class TencentBaseUploader(BaseVideoUploader):
             await page.wait_for_timeout(500)
             tencent_logger.success(_msg("🏷️", f"视频标注已选择：{label_text}"))
         except Exception as exc:
-            tencent_logger.warning(_msg("😵", f"设置视频标注「{label_text}」失败，跳过继续发布：{exc}"))
+            raise RuntimeError(f"视频号内容标注设置失败：{label_text}: {exc}") from exc
 
     async def wait_for_upload_complete(
         self, page: Page, timeout_seconds: int = 3600, max_retries: int = 3
@@ -956,6 +971,8 @@ class TencentVideo(TencentBaseUploader):
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
         collection_name: str | None = None,
+        declare_original: bool = False,
+        content_label: str | None = None,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -975,6 +992,8 @@ class TencentVideo(TencentBaseUploader):
         self.thumbnail_landscape_path = thumbnail_landscape_path
         self.thumbnail_portrait_path = thumbnail_portrait_path or thumbnail_path
         self.short_title = short_title
+        self.declare_original = declare_original
+        self.content_label = content_label
 
     async def validate_upload_args(self):
         await self.validate_base_args()
@@ -1128,7 +1147,9 @@ class TencentVideo(TencentBaseUploader):
                 await self.set_schedule_time_tencent(page, self.publish_date)
 
             await self.set_short_title(page, self.title, self.short_title)
+            emit_checkpoint("submitting")
             await self.submit_publish(page)
+            emit_result("scheduled" if self.publish_strategy == TENCENT_PUBLISH_STRATEGY_SCHEDULED else "published")
 
             await context.storage_state(path=self.account_file)
             tencent_logger.success(_msg("🥳", "cookie 更新完毕"))

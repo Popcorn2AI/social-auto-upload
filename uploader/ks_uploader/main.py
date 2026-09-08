@@ -21,6 +21,7 @@ from utils.login_qrcode import print_terminal_qrcode
 from utils.login_qrcode import remove_qrcode_file
 from utils.login_qrcode import save_data_url_image
 from utils.log import kuaishou_logger
+from utils.popcorn_events import emit_checkpoint, emit_result
 
 KUAISHOU_UPLOAD_URL = "https://cp.kuaishou.com/article/publish/video"
 KUAISHOU_MANAGE_URL = "https://cp.kuaishou.com/article/manage/video?status=2&from=publish"
@@ -505,6 +506,30 @@ class KSBaseUploader(BaseVideoUploader):
         else:
             await asyncio.sleep(0.5)
 
+    async def apply_original_declaration(self, page: Page) -> None:
+        """Apply the Kuaishou original declaration only when explicitly requested."""
+        if not getattr(self, "declare_original", False):
+            return
+
+        label = page.locator('label:text-is("作者声明")').first
+        if not await label.count():
+            raise RuntimeError("快手原创声明设置失败：未找到作者声明入口")
+
+        trigger = label.locator(
+            "xpath=following-sibling::div[contains(@class,'ant-select')]"
+        ).first
+        if not await trigger.count():
+            raise RuntimeError("快手原创声明设置失败：未找到作者声明选择框")
+        await trigger.locator(".ant-select-selector").click(timeout=8000)
+        await page.wait_for_timeout(500)
+
+        option = page.locator("div.ant-select-item-option").filter(has_text="原创").first
+        if not await option.count():
+            raise RuntimeError("快手原创声明设置失败：未找到原创选项")
+        await option.click(timeout=8000)
+        await page.wait_for_timeout(500)
+        kuaishou_logger.success(_msg("🥳", "已选择快手原创声明"))
+
 
 class KSVideo(KSBaseUploader):
     def __init__(
@@ -520,6 +545,7 @@ class KSVideo(KSBaseUploader):
         thumbnail_path=None,
         desc: str | None = None,
         collection_name: str | None = None,
+        declare_original: bool = False,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -534,6 +560,7 @@ class KSVideo(KSBaseUploader):
         self.thumbnail_path = thumbnail_path
         self.desc = desc or ""
         self.collection_name = collection_name
+        self.declare_original = declare_original
 
     async def apply_collection(self, page: Page) -> None:
         """在发布表单页选择"加入合集"下拉框（Ant Design Select，label 属性=合集名）。
@@ -704,10 +731,12 @@ class KSVideo(KSBaseUploader):
             await self.set_thumbnail(page)
 
             await self.apply_collection(page)
+            await self.apply_original_declaration(page)
 
             if self.publish_strategy == KUAISHOU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
                 await self.set_schedule_time(page, self.publish_date)
 
+            emit_checkpoint("submitting")
             last_publish_error = None
             for attempt in range(1, KUAISHOU_PUBLISH_ATTEMPTS + 1):
                 try:
@@ -723,6 +752,7 @@ class KSVideo(KSBaseUploader):
 
                     await page.wait_for_url(KUAISHOU_MANAGE_URL_PATTERN, timeout=5000)
                     kuaishou_logger.success(_msg("🥳", "视频发布成功，小人开心收工"))
+                    emit_result("scheduled" if self.publish_strategy == KUAISHOU_PUBLISH_STRATEGY_SCHEDULED else "published")
                     break
                 except Exception as exc:
                     last_publish_error = exc
@@ -763,6 +793,7 @@ class KSNote(KSBaseUploader):
         publish_strategy: str | None = None,
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        declare_original: bool = False,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -775,6 +806,7 @@ class KSNote(KSBaseUploader):
         self.note = note or ""
         self.title = title or (self.note[:20] if self.note else "")
         self.tags = tags or []
+        self.declare_original = declare_original
 
     async def validate_upload_args(self):
         await self.validate_base_args()
@@ -829,8 +861,7 @@ class KSNote(KSBaseUploader):
             await asyncio.sleep(2)
 
         max_retries = 60
-        retry_count = 0
-        while retry_count < max_retries:
+        for retry_count in range(max_retries):
             try:
                 number = await page.locator("text=上传中").count()
                 if number == 0:
@@ -848,33 +879,44 @@ class KSNote(KSBaseUploader):
             except Exception as exc:
                 kuaishou_logger.warning(_msg("😵", f"检查图文上传状态时出错，小人继续重试: {exc}"))
                 await asyncio.sleep(2)
-            retry_count += 1
+        else:
+            raise TimeoutError("等待快手图文素材上传完成超时，已停止发布")
 
-        if retry_count == max_retries:
-            kuaishou_logger.warning(_msg("😵", "超过最大重试次数，图文上传可能未完成"))
+        await self.apply_original_declaration(page)
 
         if self.publish_strategy == KUAISHOU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
             await self.set_schedule_time(page, self.publish_date)
 
-        while True:
+        emit_checkpoint("submitting")
+        last_publish_error = None
+        for attempt in range(1, KUAISHOU_PUBLISH_ATTEMPTS + 1):
             try:
-                publish_button = page.get_by_text("发布", exact=True)
-                if await publish_button.count() > 0:
+                confirmed = await _click_visible_publish_confirm(page)
+                if not confirmed:
+                    publish_button = page.get_by_text("发布", exact=True)
+                    if await publish_button.count() == 0:
+                        raise RuntimeError("未找到快手图文发布按钮")
                     await publish_button.click()
 
                 await asyncio.sleep(1)
-                confirm_button = page.get_by_text("确认发布")
-                if await confirm_button.count() > 0:
-                    await confirm_button.click()
+                await _click_visible_publish_confirm(page)
 
                 await page.wait_for_url(KUAISHOU_MANAGE_URL_PATTERN, timeout=5000)
                 kuaishou_logger.success(_msg("🥳", "图文发布成功，小人开心收工"))
+                emit_result("scheduled" if self.publish_strategy == KUAISHOU_PUBLISH_STRATEGY_SCHEDULED else "published")
                 break
             except Exception as exc:
-                kuaishou_logger.info(_msg("🏃", f"小人正在冲刺发布图文: {exc}"))
+                last_publish_error = exc
+                kuaishou_logger.info(_msg(
+                    "🏃", f"小人正在冲刺发布图文（{attempt}/{KUAISHOU_PUBLISH_ATTEMPTS}）: {exc}"
+                ))
                 if self.debug:
                     await page.screenshot(full_page=True)
                 await asyncio.sleep(1)
+        else:
+            raise RuntimeError(
+                f"快手图文发布连续失败 {KUAISHOU_PUBLISH_ATTEMPTS} 次，已停止重试: {last_publish_error}"
+            )
 
     async def upload(self, playwright: Playwright) -> None:
         kuaishou_logger.info(_msg("🧍", "小人先检查 cookie、图片和发布时间"))

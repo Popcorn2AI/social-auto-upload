@@ -27,6 +27,10 @@ class BoundedPublishTest(unittest.TestCase):
                 ROOT / "uploader" / "xiaohongshu_uploader" / "main.py",
                 {"upload_video_content", "upload_note_content"},
             ),
+            (
+                ROOT / "uploader" / "ks_uploader" / "main.py",
+                {"upload_note_content"},
+            ),
         ]
 
         offenders = [
