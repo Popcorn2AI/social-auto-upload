@@ -8,6 +8,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from utils.popcorn_events import emit_attention
+from utils.popcorn_auth import emit_auth
+
 from conf import BASE_DIR
 from uploader.baijiahao_uploader.main import (
     BaiJiaHaoVideo,
@@ -117,6 +120,7 @@ class KuaishouVideoUploadRequest:
     debug: bool = True
     headless: bool = True
     collection_name: str | None = None
+    declare_original: bool = False
 
 
 @dataclass(slots=True)
@@ -130,6 +134,7 @@ class KuaishouNoteUploadRequest:
     publish_strategy: str = KUAISHOU_PUBLISH_STRATEGY_IMMEDIATE
     debug: bool = True
     headless: bool = True
+    declare_original: bool = False
 
 
 @dataclass(slots=True)
@@ -144,6 +149,7 @@ class XiaohongshuVideoUploadRequest:
     publish_strategy: str = XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE
     debug: bool = True
     headless: bool = True
+    repost_source: str | None = None
 
 
 @dataclass(slots=True)
@@ -157,6 +163,7 @@ class XiaohongshuNoteUploadRequest:
     publish_strategy: str = XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE
     debug: bool = True
     headless: bool = True
+    repost_source: str | None = None
 
 
 @dataclass(slots=True)
@@ -189,6 +196,8 @@ class TencentVideoUploadRequest:
     debug: bool = True
     headless: bool = True
     collection_name: str | None = None
+    declare_original: bool = False
+    content_label: str | None = None
 
 
 @dataclass(slots=True)
@@ -483,6 +492,7 @@ async def upload_kuaishou_video(request: KuaishouVideoUploadRequest) -> Path:
         debug=request.debug,
         headless=request.headless,
         collection_name=request.collection_name,
+        declare_original=request.declare_original,
     )
     await app.main()
     return account_file
@@ -506,6 +516,7 @@ async def upload_kuaishou_note(request: KuaishouNoteUploadRequest) -> Path:
         publish_strategy=request.publish_strategy,
         debug=request.debug,
         headless=request.headless,
+        declare_original=request.declare_original,
     )
     await app.main()
     return account_file
@@ -530,6 +541,7 @@ async def upload_xiaohongshu_video(request: XiaohongshuVideoUploadRequest) -> Pa
         publish_strategy=request.publish_strategy,
         debug=request.debug,
         headless=request.headless,
+        repost_source=request.repost_source,
     )
     await app.main()
     return account_file
@@ -554,6 +566,7 @@ async def upload_xiaohongshu_note(request: XiaohongshuNoteUploadRequest) -> Path
         publish_strategy=request.publish_strategy,
         debug=request.debug,
         headless=request.headless,
+        repost_source=request.repost_source,
     )
     await app.main()
     return account_file
@@ -621,6 +634,8 @@ async def upload_tencent_video(request: TencentVideoUploadRequest) -> Path:
         debug=request.debug,
         headless=request.headless,
         collection_name=request.collection_name,
+        declare_original=request.declare_original,
+        content_label=request.content_label,
     )
     await app.tencent_upload_video()
     return account_file
@@ -854,6 +869,7 @@ def build_parser() -> argparse.ArgumentParser:
     kuaishou_upload_video_parser.add_argument("--schedule", type=schedule_value, help=f"Schedule time in {schedule_help}")
     kuaishou_upload_video_parser.add_argument("--thumbnail", type=existing_file_path, help="Optional thumbnail path")
     kuaishou_upload_video_parser.add_argument("--collection", default=None, help="Optional collection name to add the work into (must already exist)")
+    kuaishou_upload_video_parser.add_argument("--declare-original", action="store_true", help="Explicitly declare this work as original")
     add_runtime_flags(kuaishou_upload_video_parser)
 
     kuaishou_upload_note_parser = kuaishou_actions.add_parser("upload-note", help="Upload one note to Kuaishou")
@@ -863,6 +879,7 @@ def build_parser() -> argparse.ArgumentParser:
     kuaishou_upload_note_parser.add_argument("--note", default="", help="Optional note content")
     kuaishou_upload_note_parser.add_argument("--tags", default="", help="Comma-separated tags, such as tag1,tag2")
     kuaishou_upload_note_parser.add_argument("--schedule", type=schedule_value, help=f"Schedule time in {schedule_help}")
+    kuaishou_upload_note_parser.add_argument("--declare-original", action="store_true", help="Explicitly declare this work as original")
     add_runtime_flags(kuaishou_upload_note_parser)
 
     xiaohongshu_parser = platform_parsers.add_parser("xiaohongshu", help="Xiaohongshu operations")
@@ -882,6 +899,7 @@ def build_parser() -> argparse.ArgumentParser:
     xiaohongshu_upload_video_parser.add_argument("--tags", default="", help="Comma-separated tags, such as tag1,tag2")
     xiaohongshu_upload_video_parser.add_argument("--schedule", type=schedule_value, help=f"Schedule time in {schedule_help}")
     xiaohongshu_upload_video_parser.add_argument("--thumbnail", type=existing_file_path, help="Optional thumbnail path")
+    xiaohongshu_upload_video_parser.add_argument("--repost-source", help="Explicit source for the 来源转载 declaration")
     add_runtime_flags(xiaohongshu_upload_video_parser)
 
     xiaohongshu_upload_note_parser = xiaohongshu_actions.add_parser("upload-note", help="Upload one note to Xiaohongshu")
@@ -891,6 +909,7 @@ def build_parser() -> argparse.ArgumentParser:
     xiaohongshu_upload_note_parser.add_argument("--note", default="", help="Optional note content")
     xiaohongshu_upload_note_parser.add_argument("--tags", default="", help="Comma-separated tags, such as tag1,tag2")
     xiaohongshu_upload_note_parser.add_argument("--schedule", type=schedule_value, help=f"Schedule time in {schedule_help}")
+    xiaohongshu_upload_note_parser.add_argument("--repost-source", help="Explicit source for the 来源转载 declaration")
     add_runtime_flags(xiaohongshu_upload_note_parser)
 
     bilibili_parser = platform_parsers.add_parser("bilibili", help="Bilibili operations")
@@ -933,6 +952,8 @@ def build_parser() -> argparse.ArgumentParser:
     tencent_upload_video_parser.add_argument("--category", help="Optional original content category")
     tencent_upload_video_parser.add_argument("--draft", action="store_true", help="Save as draft instead of publishing")
     tencent_upload_video_parser.add_argument("--collection", default=None, help="Optional collection name to add the work into (must already exist)")
+    tencent_upload_video_parser.add_argument("--declare-original", action="store_true", help="Explicitly declare this work as original")
+    tencent_upload_video_parser.add_argument("--content-label", choices=["ai_generated"], help="Explicit WeChat Channels content label")
     add_runtime_flags(tencent_upload_video_parser)
 
     alipay_parser = platform_parsers.add_parser("alipay", help="Alipay life account operations")
@@ -1043,6 +1064,7 @@ async def dispatch(args: argparse.Namespace) -> int:
             if not result["success"]:
                 raise RuntimeError(result["message"])
             print(f"Douyin login flow completed: {result['account_file']}")
+            emit_auth("authenticated")
             return 0
 
         if args.action == "check":
@@ -1069,7 +1091,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
-                collection_name=args.collection,
+                collection_name=getattr(args, "collection", None),
             )
             await upload_video(request)
             print(f"Douyin video upload submitted: {request.video_file}")
@@ -1078,8 +1100,9 @@ async def dispatch(args: argparse.Namespace) -> int:
         if args.action == "upload-note":
             # 如果指定了 --notef，读取文件内容作为 note
             note_content = args.note
-            if args.notef:
-                note_file = Path(args.notef)
+            note_file_arg = getattr(args, "notef", None)
+            if note_file_arg:
+                note_file = Path(note_file_arg)
                 if not note_file.exists():
                     print(f"错误：文件不存在: {note_file}", file=sys.stderr)
                     return 1
@@ -1095,7 +1118,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
-                bgm=args.bgm or "",
+                bgm=getattr(args, "bgm", "") or "",
             )
             await upload_note(request)
             print(f"Douyin note upload submitted: {len(request.image_files)} images")
@@ -1109,6 +1132,7 @@ async def dispatch(args: argparse.Namespace) -> int:
             if not result["success"]:
                 raise RuntimeError(result["message"])
             print(f"Kuaishou login flow completed: {result['account_file']}")
+            emit_auth("authenticated")
             return 0
 
         if args.action == "check":
@@ -1131,6 +1155,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 debug=args.debug,
                 headless=args.headless,
                 collection_name=args.collection,
+                declare_original=args.declare_original,
             )
             await upload_kuaishou_video(request)
             print(f"Kuaishou video upload submitted: {request.video_file}")
@@ -1147,6 +1172,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
+                declare_original=args.declare_original,
             )
             await upload_kuaishou_note(request)
             print(f"Kuaishou note upload submitted: {len(request.image_files)} images")
@@ -1160,6 +1186,7 @@ async def dispatch(args: argparse.Namespace) -> int:
             if not result["success"]:
                 raise RuntimeError(result["message"])
             print(f"Xiaohongshu login flow completed: {result['account_file']}")
+            emit_auth("authenticated")
             return 0
 
         if args.action == "check":
@@ -1187,6 +1214,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
+                repost_source=getattr(args, "repost_source", None),
             )
             await upload_xiaohongshu_video(request)
             print(f"Xiaohongshu video upload submitted: {request.video_file}")
@@ -1207,6 +1235,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
+                repost_source=getattr(args, "repost_source", None),
             )
             await upload_xiaohongshu_note(request)
             print(f"Xiaohongshu note upload submitted: {len(request.image_files)} images")
@@ -1250,6 +1279,7 @@ async def dispatch(args: argparse.Namespace) -> int:
             if not result["success"]:
                 raise RuntimeError(result["message"])
             print(f"Tencent/WeChat Channels login flow completed: {result['account_file']}")
+            emit_auth("authenticated")
             return 0
 
         if args.action == "check":
@@ -1276,7 +1306,9 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
-                collection_name=args.collection,
+                collection_name=getattr(args, "collection", None),
+                declare_original=getattr(args, "declare_original", None),
+                content_label=getattr(args, "content_label", None),
             )
             await upload_tencent_video(request)
             print(f"Tencent/WeChat Channels video upload submitted: {request.video_file}")
@@ -1448,7 +1480,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         return asyncio.run(dispatch(args))
     except Exception as exc:
-        print(str(exc), file=sys.stderr)
+        message = str(exc)
+        lowered = message.lower()
+        if any(token in lowered for token in ("验证码", "验证", "captcha", "实名")):
+            emit_attention("verification_required", "平台要求完成真人验证")
+        elif any(token in lowered for token in ("频繁", "限流", "rate limit", "too many requests")):
+            emit_attention("rate_limited", "平台限制了当前账号的发布频率")
+        elif any(token in lowered for token in ("账号异常", "账号受限", "封禁", "account restricted")):
+            emit_attention("account_restricted", "平台限制了当前账号的发布能力")
+        print(message, file=sys.stderr)
         return 1
 
 

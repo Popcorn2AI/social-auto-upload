@@ -1,7 +1,7 @@
 import asyncio
 import sqlite3
 
-from playwright.async_api import async_playwright
+from patchright.async_api import async_playwright
 
 from myUtils.auth import check_cookie
 from utils.base_social_media import set_init_script

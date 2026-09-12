@@ -2,7 +2,7 @@ import asyncio
 import configparser
 import os
 
-from playwright.async_api import async_playwright
+from patchright.async_api import async_playwright
 from xhs import XhsClient
 
 from conf import BASE_DIR, LOCAL_CHROME_HEADLESS
