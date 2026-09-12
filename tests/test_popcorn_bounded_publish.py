@@ -17,6 +17,20 @@ def _unbounded_loops(file_path: Path, method_names: set[str]) -> list[str]:
 
 
 class BoundedPublishTest(unittest.TestCase):
+    def test_runtime_sources_only_use_declared_patchright_browser_dependency(self):
+        runtime_sources = [
+            *sorted((ROOT / "uploader").rglob("*.py")),
+            *sorted((ROOT / "myUtils").rglob("*.py")),
+        ]
+        offenders = []
+        for file_path in runtime_sources:
+            tree = ast.parse(file_path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("playwright"):
+                    offenders.append(f"{file_path.relative_to(ROOT)}:{node.lineno}")
+
+        self.assertEqual(offenders, [])
+
     def test_popcorn_supported_publish_flows_have_no_unbounded_polling_loops(self):
         cases = [
             (

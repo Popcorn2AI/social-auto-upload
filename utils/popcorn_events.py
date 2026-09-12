@@ -25,3 +25,7 @@ def emit_result(status: str, platform_work_id: str | None = None) -> None:
     if platform_work_id:
         payload["platformWorkId"] = platform_work_id
     _emit(payload)
+
+
+def emit_attention(kind: str, message: str) -> None:
+    _emit({"type": "attention", "kind": kind, "message": message})

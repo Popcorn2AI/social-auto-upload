@@ -8,6 +8,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from utils.popcorn_events import emit_attention
+from utils.popcorn_auth import emit_auth
+
 from conf import BASE_DIR
 from uploader.baijiahao_uploader.main import (
     BaiJiaHaoVideo,
@@ -1061,6 +1064,7 @@ async def dispatch(args: argparse.Namespace) -> int:
             if not result["success"]:
                 raise RuntimeError(result["message"])
             print(f"Douyin login flow completed: {result['account_file']}")
+            emit_auth("authenticated")
             return 0
 
         if args.action == "check":
@@ -1087,7 +1091,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
-                collection_name=args.collection,
+                collection_name=getattr(args, "collection", None),
             )
             await upload_video(request)
             print(f"Douyin video upload submitted: {request.video_file}")
@@ -1096,8 +1100,9 @@ async def dispatch(args: argparse.Namespace) -> int:
         if args.action == "upload-note":
             # 如果指定了 --notef，读取文件内容作为 note
             note_content = args.note
-            if args.notef:
-                note_file = Path(args.notef)
+            note_file_arg = getattr(args, "notef", None)
+            if note_file_arg:
+                note_file = Path(note_file_arg)
                 if not note_file.exists():
                     print(f"错误：文件不存在: {note_file}", file=sys.stderr)
                     return 1
@@ -1113,7 +1118,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
-                bgm=args.bgm or "",
+                bgm=getattr(args, "bgm", "") or "",
             )
             await upload_note(request)
             print(f"Douyin note upload submitted: {len(request.image_files)} images")
@@ -1127,6 +1132,7 @@ async def dispatch(args: argparse.Namespace) -> int:
             if not result["success"]:
                 raise RuntimeError(result["message"])
             print(f"Kuaishou login flow completed: {result['account_file']}")
+            emit_auth("authenticated")
             return 0
 
         if args.action == "check":
@@ -1180,6 +1186,7 @@ async def dispatch(args: argparse.Namespace) -> int:
             if not result["success"]:
                 raise RuntimeError(result["message"])
             print(f"Xiaohongshu login flow completed: {result['account_file']}")
+            emit_auth("authenticated")
             return 0
 
         if args.action == "check":
@@ -1207,7 +1214,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
-                repost_source=args.repost_source,
+                repost_source=getattr(args, "repost_source", None),
             )
             await upload_xiaohongshu_video(request)
             print(f"Xiaohongshu video upload submitted: {request.video_file}")
@@ -1228,7 +1235,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
-                repost_source=args.repost_source,
+                repost_source=getattr(args, "repost_source", None),
             )
             await upload_xiaohongshu_note(request)
             print(f"Xiaohongshu note upload submitted: {len(request.image_files)} images")
@@ -1272,6 +1279,7 @@ async def dispatch(args: argparse.Namespace) -> int:
             if not result["success"]:
                 raise RuntimeError(result["message"])
             print(f"Tencent/WeChat Channels login flow completed: {result['account_file']}")
+            emit_auth("authenticated")
             return 0
 
         if args.action == "check":
@@ -1298,9 +1306,9 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
-                collection_name=args.collection,
-                declare_original=args.declare_original,
-                content_label=args.content_label,
+                collection_name=getattr(args, "collection", None),
+                declare_original=getattr(args, "declare_original", None),
+                content_label=getattr(args, "content_label", None),
             )
             await upload_tencent_video(request)
             print(f"Tencent/WeChat Channels video upload submitted: {request.video_file}")
@@ -1472,7 +1480,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         return asyncio.run(dispatch(args))
     except Exception as exc:
-        print(str(exc), file=sys.stderr)
+        message = str(exc)
+        lowered = message.lower()
+        if any(token in lowered for token in ("验证码", "验证", "captcha", "实名")):
+            emit_attention("verification_required", "平台要求完成真人验证")
+        elif any(token in lowered for token in ("频繁", "限流", "rate limit", "too many requests")):
+            emit_attention("rate_limited", "平台限制了当前账号的发布频率")
+        elif any(token in lowered for token in ("账号异常", "账号受限", "封禁", "account restricted")):
+            emit_attention("account_restricted", "平台限制了当前账号的发布能力")
+        print(message, file=sys.stderr)
         return 1
 
 

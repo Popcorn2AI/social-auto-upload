@@ -6,11 +6,61 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import sau_cli
-from uploader.ks_uploader.main import KSNote, KSVideo
-from uploader.tencent_uploader.main import TencentVideo
+from uploader.ks_uploader.main import KSNote, KSVideo, build_kuaishou_publish_text
+from uploader.tencent_uploader.main import TencentVideo, build_tencent_description_text
 
 
 class PopcornKuaishouTencentContractTests(unittest.TestCase):
+    def test_tencent_description_contains_intro_then_tags_without_repeating_title(self):
+        self.assertEqual(
+            build_tencent_description_text("作品简介", ["话题一", "#话题二"]),
+            "作品简介\n#话题一 #话题二",
+        )
+
+    def test_kuaishou_publish_text_preserves_title_then_description_and_tags(self):
+        self.assertEqual(
+            build_kuaishou_publish_text("完整标题", "作品简介", ["话题一", "话题二"]),
+            "完整标题\n作品简介\n#话题一 #话题二",
+        )
+        self.assertEqual(
+            build_kuaishou_publish_text("重复内容", "重复内容", ["话题"]),
+            "重复内容\n#话题",
+        )
+
+    def test_kuaishou_publish_text_rejects_overflow_instead_of_truncating(self):
+        with self.assertRaisesRegex(ValueError, "上限"):
+            build_kuaishou_publish_text("必须完整保留的标题", "很长的简介内容", [], max_length=12)
+
+    def test_kuaishou_publish_text_rejects_excess_tags_instead_of_dropping_them(self):
+        with self.assertRaisesRegex(ValueError, "话题不能超过 3 个"):
+            build_kuaishou_publish_text("标题", "正文", ["一", "二", "三", "四"])
+
+    def test_kuaishou_note_text_contains_title_body_and_tags(self):
+        self.assertEqual(
+            build_kuaishou_publish_text("图文标题", "图文正文", ["话题一", "#话题二"]),
+            "图文标题\n图文正文\n#话题一 #话题二",
+        )
+
+    def test_tencent_description_refocuses_and_verifies_editor_content(self):
+        app = TencentVideo(
+            "短标题", "/tmp/video.mp4", ["话题"], 0, "/tmp/cookie.json",
+            desc="作品简介",
+        )
+        editor = MagicMock()
+        editor.first = editor
+        editor.click = AsyncMock(return_value=None)
+        editor.inner_text = AsyncMock(return_value="作品简介\n#话题")
+        page = MagicMock()
+        page.locator.return_value = editor
+        page.keyboard.press = AsyncMock(return_value=None)
+        page.keyboard.type = AsyncMock(return_value=None)
+
+        asyncio.run(app.fill_description(page))
+
+        editor.click.assert_awaited()
+        editor.inner_text.assert_awaited()
+        page.keyboard.type.assert_awaited_once_with("作品简介\n#话题")
+
     def test_parser_accepts_explicit_compliance_options(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             video = Path(temp_dir) / "video.mp4"

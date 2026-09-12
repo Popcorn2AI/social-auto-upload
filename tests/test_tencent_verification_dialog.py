@@ -19,7 +19,7 @@ def test_wait_for_realtime_verification_saves_qr_and_resumes(tmp_path: Path):
                 </div>
                 """
             )
-            uploader = TencentBaseUploader(publish_date=0, account_file="unused")
+            uploader = TencentBaseUploader(publish_date=0, account_file="unused", headless=False)
             qr_path = tmp_path / "verification.png"
 
             async def dismiss_dialog():

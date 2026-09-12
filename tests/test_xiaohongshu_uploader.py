@@ -61,12 +61,16 @@ class RecordingKeyboard:
 
 
 class RecordingLocator(FakeLocator):
-    def __init__(self, name):
+    def __init__(self, name, text=None):
         super().__init__(name, count=1)
         self.actions = []
+        self.text = text
 
     async def fill(self, value):
         self.actions.append(("fill", value))
+
+    async def press(self, key):
+        self.actions.append(("press", key))
 
     async def click(self):
         self.actions.append(("click",))
@@ -74,19 +78,32 @@ class RecordingLocator(FakeLocator):
     async def wait_for(self, **kwargs):
         self.actions.append(("wait_for", kwargs))
 
+    async def input_value(self):
+        return "标题内容"
+
+    async def inner_text(self):
+        return self.text or "描述内容 #话题1"
+
+    async def is_visible(self):
+        return True
+
 
 class RecordingPage:
     def __init__(self):
         self.keyboard = RecordingKeyboard()
         self.locators = {
             'input[placeholder*="填写标题"]': RecordingLocator("title"),
-            'p[data-placeholder*="输入正文描述"]': RecordingLocator("desc"),
+            '[contenteditable="true"]': RecordingLocator("desc"),
             '#creator-editor-topic-container': RecordingLocator("topic-container"),
-            '#creator-editor-topic-container .item': RecordingLocator("topic-item"),
+            '#creator-editor-topic-container .item': RecordingLocator("topic-item", "话题1"),
+            'text:话题内不允许包含特殊符号': FakeLocator("topic-rejection"),
         }
 
     def locator(self, selector):
         return self.locators[selector]
+
+    def get_by_text(self, text, exact=False):
+        return self.locators.get(f"text:{text}", FakeLocator(text))
 
 
 class XiaohongshuUploaderTests(unittest.TestCase):
@@ -228,6 +245,7 @@ class XiaohongshuUploaderTests(unittest.TestCase):
             desc="描述内容",
         )
         page = RecordingPage()
+        page.locators['[contenteditable="true"]'].inner_text = AsyncMock(side_effect=["描述内容", "描述内容 #话题1"])
 
         asyncio.run(app.fill_meta(page))
 
@@ -236,14 +254,13 @@ class XiaohongshuUploaderTests(unittest.TestCase):
             [("fill", "标题内容")],
         )
         self.assertEqual(
-            page.locators['p[data-placeholder*="输入正文描述"]'].actions,
-            [("click",)],
+            page.locators['[contenteditable="true"]'].actions,
+            [("fill", "描述内容"), ("press", "ControlOrMeta+KeyA"), ("press", "ArrowRight"), ("press", "Enter")],
         )
-        self.assertIn(("type", "描述内容", None), page.keyboard.actions)
         self.assertIn(("type", "#话题1", 30), page.keyboard.actions)
         self.assertEqual(
             page.locators['#creator-editor-topic-container .item'].actions,
-            [("wait_for", {"state": "visible", "timeout": 4000}), ("click",)],
+            [("click",)],
         )
 
     def test_video_fill_meta_can_fill_first_tag_without_desc(self):
@@ -259,11 +276,51 @@ class XiaohongshuUploaderTests(unittest.TestCase):
         asyncio.run(app.fill_meta(page))
 
         self.assertEqual(
-            page.locators['p[data-placeholder*="输入正文描述"]'].actions,
+            page.locators['[contenteditable="true"]'].actions,
             [("click",)],
         )
         self.assertNotIn(("type", "", None), page.keyboard.actions)
         self.assertIn(("type", "#话题1", 30), page.keyboard.actions)
+
+    def test_title_overflow_is_rejected_instead_of_truncated(self):
+        app = xhs_main.XiaoHongShuVideo(
+            title="长" * 21,
+            file_path="demo.mp4",
+            tags=[],
+            publish_date=0,
+            account_file="account.json",
+        )
+
+        with self.assertRaisesRegex(ValueError, "标题"):
+            asyncio.run(app.fill_title(RecordingPage()))
+
+    def test_too_many_tags_are_rejected_instead_of_dropped(self):
+        app = xhs_main.XiaoHongShuVideo(
+            title="标题",
+            file_path="demo.mp4",
+            tags=[f"话题{i}" for i in range(11)],
+            publish_date=0,
+            account_file="account.json",
+        )
+
+        with self.assertRaisesRegex(ValueError, "话题"):
+            asyncio.run(app.fill_tags(RecordingPage()))
+
+    def test_missing_matching_topic_candidate_blocks_publish(self):
+        app = xhs_main.XiaoHongShuVideo(
+            title="标题",
+            file_path="demo.mp4",
+            tags=["不存在的话题"],
+            publish_date=0,
+            account_file="account.json",
+            desc="描述内容",
+        )
+        page = RecordingPage()
+        page.locators['#creator-editor-topic-container .item'] = FakeLocator("empty")
+
+        with patch("uploader.xiaohongshu_uploader.main.asyncio.sleep", new=AsyncMock()):
+            with self.assertRaisesRegex(RuntimeError, "未找到与『不存在的话题』匹配"):
+                asyncio.run(app.fill_tags(page))
 
     def test_note_title_defaults_do_not_override_explicit_title(self):
         app = xhs_main.XiaoHongShuNote(

@@ -2,7 +2,7 @@
 import re
 from datetime import datetime
 
-from playwright.async_api import Playwright, async_playwright
+from patchright.async_api import Playwright, async_playwright
 import os
 import asyncio
 from uploader.tk_uploader.tk_config import Tk_Locator
@@ -264,4 +264,3 @@ class TiktokVideo(object):
     async def main(self):
         async with async_playwright() as playwright:
             await self.upload(playwright)
-
