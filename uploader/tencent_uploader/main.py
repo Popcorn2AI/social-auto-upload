@@ -21,6 +21,7 @@ from utils.log import tencent_logger
 from utils.popcorn_diagnostics import capture_page_diagnostic
 from utils.popcorn_auth import observe_auth_page, emit_auth
 from utils.popcorn_events import emit_checkpoint, emit_result
+from utils.popcorn_publish_session import publish_session, publish_step, before_publish_submit, publish_session_active
 
 TENCENT_LOGIN_URL = "https://channels.weixin.qq.com"
 TENCENT_HOME_URL = "https://channels.weixin.qq.com/platform"
@@ -557,7 +558,7 @@ class TencentBaseUploader(BaseVideoUploader):
         dialog = page.locator("div.weui-desktop-dialog__wrp:visible").filter(has_text="实名验证").first
         if not await dialog.count() or not await dialog.is_visible():
             return None
-        if self.headless:
+        if self.headless or publish_session_active():
             raise RuntimeError("视频号要求管理员实名验证，请使用可见浏览器重试")
 
         output_path = Path(qr_path) if qr_path else Path(self.account_file).with_name(
@@ -964,10 +965,9 @@ class TencentBaseUploader(BaseVideoUploader):
         # 提交动作只能执行一次。提交后的页面异常必须交给上层按 unknown 处理，禁止重复点击导致重复发布。
         if not await publish_btn.count():
             raise RuntimeError("未找到视频号发表按钮，已阻止发布")
-        try:
-            await publish_btn.click(timeout=4000)
-        except Exception:
-            await publish_btn.evaluate("el => el.click()")
+        await before_publish_submit()
+        emit_checkpoint("submitting")
+        await publish_btn.click(timeout=4000)
 
         if is_draft:
             try:
@@ -1053,7 +1053,7 @@ class TencentVideo(TencentBaseUploader):
         tencent_logger.info(_msg("😵", "视频出错了，重新上传中"))
         await page.locator('div.media-status-content div.tag-inner:has-text("删除")').click()
         await page.get_by_role("button", name="删除", exact=True).click()
-        await self.upload_video_file(page, self.file_path)
+        await publish_step(lambda: self.upload_video_file(page, self.file_path))
 
     async def open_thumbnail_dialog(self, page: Page, selectors: list[str], dialog_titles: list[str]):
         for selector in selectors:
@@ -1175,24 +1175,24 @@ class TencentVideo(TencentBaseUploader):
         page = None
         try:
             page = await context.new_page()
-            await self.open_upload_page(page)
-            tencent_logger.info(_msg("🏃", f"小人开始搬运视频: {self.title}"))
+            async with publish_session(page, headed=not self.headless, platform="wechat_channels"):
+                await publish_step(lambda: self.open_upload_page(page))
+                tencent_logger.info(_msg("🏃", f"小人开始搬运视频: {self.title}"))
 
-            await self.upload_video_file(page, self.file_path)
-            await self.prepare_video_for_publish(page)
-            await self.wait_for_upload_complete(page)
-            # 上传完成、表单稳定后再选合集（否则上传中选的会被重置）
-            await self.apply_collection(page)
-            await self.apply_original_statement(page)
-            await self.set_thumbnail(page)
+                await publish_step(lambda: self.upload_video_file(page, self.file_path))
+                await publish_step(lambda: self.prepare_video_for_publish(page))
+                await publish_step(lambda: self.wait_for_upload_complete(page))
+                # 上传完成、表单稳定后再选合集（否则上传中选的会被重置）
+                await publish_step(lambda: self.apply_collection(page))
+                await publish_step(lambda: self.apply_original_statement(page))
+                await publish_step(lambda: self.set_thumbnail(page))
 
-            if self.publish_strategy == TENCENT_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
-                await self.set_schedule_time_tencent(page, self.publish_date)
+                if self.publish_strategy == TENCENT_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
+                    await publish_step(lambda: self.set_schedule_time_tencent(page, self.publish_date))
 
-            await self.set_short_title(page, self.title, self.short_title)
-            emit_checkpoint("submitting")
-            await self.submit_publish(page)
-            emit_result("scheduled" if self.publish_strategy == TENCENT_PUBLISH_STRATEGY_SCHEDULED else "published")
+                await publish_step(lambda: self.set_short_title(page, self.title, self.short_title))
+                await publish_step(lambda: self.submit_publish(page))
+                emit_result("scheduled" if self.publish_strategy == TENCENT_PUBLISH_STRATEGY_SCHEDULED else "published")
 
             await context.storage_state(path=self.account_file)
             tencent_logger.success(_msg("🥳", "cookie 更新完毕"))

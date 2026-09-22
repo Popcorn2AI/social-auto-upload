@@ -27,6 +27,7 @@ from utils.log import kuaishou_logger
 from utils.popcorn_diagnostics import capture_page_diagnostic
 from utils.popcorn_auth import observe_auth_page, emit_auth
 from utils.popcorn_events import emit_checkpoint, emit_result
+from utils.popcorn_publish_session import publish_session, publish_step, before_publish_submit
 
 KUAISHOU_UPLOAD_URL = "https://cp.kuaishou.com/article/publish/video"
 KUAISHOU_MANAGE_URL = "https://cp.kuaishou.com/article/manage/video?status=2&from=publish"
@@ -199,7 +200,7 @@ async def _focus_desc_editor(page) -> Locator:
         f"请据此更新选择器。最后错误: {last_err}")
 
 
-async def _click_visible_publish_confirm(page: Page) -> bool:
+async def _click_visible_publish_confirm(page: Page, *, initial=False) -> bool:
     """Confirm an already-open Ant Design publish dialog before touching the page behind it."""
     modal = page.locator("div.ant-modal-confirm-centered:visible").first
     if not await modal.count():
@@ -209,17 +210,22 @@ async def _click_visible_publish_confirm(page: Page) -> bool:
     if not await primary_button.count():
         raise RuntimeError("快手发布确认弹窗已显示，但未找到可点击的主按钮")
 
+    if initial:
+        await before_publish_submit()
+        emit_checkpoint("submitting")
     await primary_button.click(timeout=8000)
     return True
 
 
 async def submit_kuaishou_publish_once(page: Page) -> None:
     """只发送一次快手发布动作；提交后的不确定结果由 Popcorn 标记为待确认。"""
-    confirmed = await _click_visible_publish_confirm(page)
+    confirmed = await _click_visible_publish_confirm(page, initial=True)
     if not confirmed:
         publish_button = page.get_by_text("发布", exact=True)
         if await publish_button.count() == 0:
             raise RuntimeError("未找到快手发布按钮")
+        await before_publish_submit()
+        emit_checkpoint("submitting")
         await publish_button.click()
 
     await asyncio.sleep(1)
@@ -850,86 +856,92 @@ class KSVideo(KSBaseUploader):
         page = None
         try:
             page = await context.new_page()
-            await page.goto(KUAISHOU_UPLOAD_URL)
-            kuaishou_logger.info(_msg("🏃", f"小人开始搬运视频: {self.title}.mp4"))
-            kuaishou_logger.info(_msg("🧭", "小人正在赶往快手上传主页"))
-            await page.wait_for_url(KUAISHOU_UPLOAD_URL_PATTERN)
+            async with publish_session(page, headed=not self.headless, platform="kuaishou"):
+                await publish_step(lambda: page.goto(KUAISHOU_UPLOAD_URL))
+                kuaishou_logger.info(_msg("🏃", f"小人开始搬运视频: {self.title}.mp4"))
+                kuaishou_logger.info(_msg("🧭", "小人正在赶往快手上传主页"))
+                await publish_step(lambda: page.wait_for_url(KUAISHOU_UPLOAD_URL_PATTERN))
 
-            upload_button = page.locator("button[class^='_upload-btn']")
-            await upload_button.wait_for(state="visible", timeout=10000)
+                upload_button = page.locator("button[class^='_upload-btn']")
+                await publish_step(lambda: upload_button.wait_for(state="visible", timeout=10000))
 
-            async with page.expect_file_chooser() as fc_info:
-                await upload_button.click()
-            file_chooser = await fc_info.value
-            await file_chooser.set_files(self.file_path)
+                async def choose_publish_files():
+                    async with page.expect_file_chooser() as fc_info:
+                        await upload_button.click()
+                    file_chooser = await fc_info.value
+                    await file_chooser.set_files(self.file_path)
+                await publish_step(choose_publish_files)
 
-            await asyncio.sleep(2)
+                await asyncio.sleep(2)
 
-            know_button = page.locator('button[type="button"] span:text("我知道了")').first
-            try:
-                if await know_button.count() and await know_button.is_visible():
-                    await know_button.click()
-            except Exception:
-                pass
-
-            await self.close_guide_overlay(page)
-
-            kuaishou_logger.info(_msg("✍️", "小人开始填描述和话题"))
-            # 再次检查并关闭 Joyride（可能在文件上传后才弹出）
-            await self.close_guide_overlay(page)
-            desc_editor = await _focus_desc_editor(page)
-            await page.keyboard.press("Backspace")
-            await page.keyboard.press("Control+KeyA")
-            await page.keyboard.press("Delete")
-            publish_text = build_kuaishou_publish_text(self.title, self.desc, self.tags)
-            await page.keyboard.type(publish_text)
-            actual_publish_text = await desc_editor.inner_text(timeout=8000)
-            expected_fragments = [
-                self.title.strip(),
-                self.desc.strip(),
-                *(f"#{tag.strip().lstrip('#')}" for tag in self.tags if tag.strip()),
-            ]
-            if any(fragment and fragment not in actual_publish_text for fragment in expected_fragments):
-                raise RuntimeError("快手标题、简介或话题写入校验失败，已阻止发布")
-
-            loop = asyncio.get_running_loop()
-            upload_deadline = loop.time() + KUAISHOU_UPLOAD_TIMEOUT_SECONDS
-            retry_count = 0
-            while loop.time() < upload_deadline:
+                know_button = page.locator('button[type="button"] span:text("我知道了")').first
                 try:
-                    number = await page.locator("text=上传中").count()
-                    if number == 0:
-                        kuaishou_logger.success(_msg("🥳", "视频已经传完啦"))
-                        break
+                    if await know_button.count() and await know_button.is_visible():
+                        await know_button.click()
+                except Exception:
+                    pass
 
-                    if retry_count % 5 == 0:
-                        kuaishou_logger.info(_msg("🏃", "小人正在努力上传视频"))
+                await self.close_guide_overlay(page)
 
-                    if await page.locator("text=上传失败").count():
-                        await self.handle_upload_error(page)
+                kuaishou_logger.info(_msg("✍️", "小人开始填描述和话题"))
+                # 再次检查并关闭 Joyride（可能在文件上传后才弹出）
+                await self.close_guide_overlay(page)
+                async def fill_publish_text():
+                    desc_editor = await _focus_desc_editor(page)
+                    await page.keyboard.press("Backspace")
+                    await page.keyboard.press("Control+KeyA")
+                    await page.keyboard.press("Delete")
+                    publish_text = build_kuaishou_publish_text(self.title, self.desc, self.tags)
+                    await page.keyboard.type(publish_text)
+                    actual_publish_text = await desc_editor.inner_text(timeout=8000)
+                    expected_fragments = [
+                        self.title.strip(),
+                        self.desc.strip(),
+                        *(f"#{tag.strip().lstrip('#')}" for tag in self.tags if tag.strip()),
+                    ]
+                    if any(fragment and fragment not in actual_publish_text for fragment in expected_fragments):
+                        raise RuntimeError("快手标题、简介或话题写入校验失败，已阻止发布")
+                await publish_step(fill_publish_text)
 
-                    await asyncio.sleep(2)
-                except Exception as exc:
-                    kuaishou_logger.warning(_msg("😵", f"检查上传状态时出错，小人继续重试: {exc}"))
-                    await asyncio.sleep(2)
-                retry_count += 1
-            else:
-                raise TimeoutError(
-                    f"等待快手视频上传完成超时（>{KUAISHOU_UPLOAD_TIMEOUT_SECONDS}秒），已停止发布"
-                )
+                loop = asyncio.get_running_loop()
+                async def wait_for_video_upload():
+                    upload_deadline = loop.time() + KUAISHOU_UPLOAD_TIMEOUT_SECONDS
+                    retry_count = 0
+                    while loop.time() < upload_deadline:
+                        try:
+                            number = await page.locator("text=上传中").count()
+                            if number == 0:
+                                kuaishou_logger.success(_msg("🥳", "视频已经传完啦"))
+                                break
 
-            await self.set_thumbnail(page)
+                            if retry_count % 5 == 0:
+                                kuaishou_logger.info(_msg("🏃", "小人正在努力上传视频"))
 
-            await self.apply_collection(page)
-            await self.apply_original_declaration(page)
+                            if await page.locator("text=上传失败").count():
+                                await self.handle_upload_error(page)
 
-            if self.publish_strategy == KUAISHOU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
-                await self.set_schedule_time(page, self.publish_date)
+                            await asyncio.sleep(2)
+                        except Exception as exc:
+                            kuaishou_logger.warning(_msg("😵", f"检查上传状态时出错，小人继续重试: {exc}"))
+                            await asyncio.sleep(2)
+                        retry_count += 1
+                    else:
+                        raise TimeoutError(
+                            f"等待快手视频上传完成超时（>{KUAISHOU_UPLOAD_TIMEOUT_SECONDS}秒），已停止发布"
+                        )
+                await publish_step(wait_for_video_upload)
 
-            emit_checkpoint("submitting")
-            await submit_kuaishou_publish_once(page)
-            kuaishou_logger.success(_msg("🥳", "视频发布成功，小人开心收工"))
-            emit_result("scheduled" if self.publish_strategy == KUAISHOU_PUBLISH_STRATEGY_SCHEDULED else "published")
+                await publish_step(lambda: self.set_thumbnail(page))
+
+                await publish_step(lambda: self.apply_collection(page))
+                await publish_step(lambda: self.apply_original_declaration(page))
+
+                if self.publish_strategy == KUAISHOU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
+                    await publish_step(lambda: self.set_schedule_time(page, self.publish_date))
+
+                await publish_step(lambda: submit_kuaishou_publish_once(page))
+                kuaishou_logger.success(_msg("🥳", "视频发布成功，小人开心收工"))
+                emit_result("scheduled" if self.publish_strategy == KUAISHOU_PUBLISH_STRATEGY_SCHEDULED else "published")
 
             upload_success = True
         except Exception as exc:
@@ -999,17 +1011,19 @@ class KSNote(KSBaseUploader):
     async def upload_note_content(self, page: Page) -> None:
         kuaishou_logger.info(_msg("🏃", f"小人开始搬运图文，共 {len(self.image_paths)} 张图片"))
         kuaishou_logger.info(_msg("🔀", "小人正在切换到图文发布"))
-        await page.locator('div[role="tablist"] div[role="tab"]:has-text("图文")').click()
+        await publish_step(lambda: page.locator('div[role="tablist"] div[role="tab"]:has-text("图文")').click())
         await page.wait_for_timeout(1000)
 
         kuaishou_logger.info(_msg("📤", "小人正在上传图片"))
         upload_button = page.locator("button[class^='_upload-btn']").filter(has_text="上传图片")
-        await upload_button.wait_for(state="visible", timeout=10000)
+        await publish_step(lambda: upload_button.wait_for(state="visible", timeout=10000))
 
-        async with page.expect_file_chooser() as fc_info:
-            await upload_button.click()
-        file_chooser = await fc_info.value
-        await file_chooser.set_files(self.image_paths)
+        async def choose_publish_files():
+            async with page.expect_file_chooser() as fc_info:
+                await upload_button.click()
+            file_chooser = await fc_info.value
+            await file_chooser.set_files(self.image_paths)
+        await publish_step(choose_publish_files)
 
         know_button = page.locator('button[type="button"] span:text("我知道了")').first
         try:
@@ -1021,50 +1035,53 @@ class KSNote(KSBaseUploader):
         await self.close_guide_overlay(page)
 
         kuaishou_logger.info(_msg("✍️", "小人开始填写图文内容和话题"))
-        desc_editor = await _focus_desc_editor(page)
-        await page.keyboard.press("Backspace")
-        await page.keyboard.press("Control+KeyA")
-        await page.keyboard.press("Delete")
-        publish_text = build_kuaishou_publish_text(self.title, self.note, self.tags)
-        await page.keyboard.type(publish_text)
-        actual_publish_text = await desc_editor.inner_text(timeout=8000)
-        expected_fragments = [
-            self.title.strip(),
-            self.note.strip(),
-            *(f"#{tag.strip().lstrip('#')}" for tag in self.tags if tag.strip()),
-        ]
-        if any(fragment and fragment not in actual_publish_text for fragment in expected_fragments):
-            raise RuntimeError("快手图文标题、正文或话题写入校验失败，已阻止发布")
+        async def fill_publish_text():
+            desc_editor = await _focus_desc_editor(page)
+            await page.keyboard.press("Backspace")
+            await page.keyboard.press("Control+KeyA")
+            await page.keyboard.press("Delete")
+            publish_text = build_kuaishou_publish_text(self.title, self.note, self.tags)
+            await page.keyboard.type(publish_text)
+            actual_publish_text = await desc_editor.inner_text(timeout=8000)
+            expected_fragments = [
+                self.title.strip(),
+                self.note.strip(),
+                *(f"#{tag.strip().lstrip('#')}" for tag in self.tags if tag.strip()),
+            ]
+            if any(fragment and fragment not in actual_publish_text for fragment in expected_fragments):
+                raise RuntimeError("快手图文标题、正文或话题写入校验失败，已阻止发布")
+        await publish_step(fill_publish_text)
 
         max_retries = 60
-        for retry_count in range(max_retries):
-            try:
-                number = await page.locator("text=上传中").count()
-                if number == 0:
-                    kuaishou_logger.success(_msg("🥳", "图文素材已经传完啦"))
-                    break
+        async def wait_for_image_upload():
+            for retry_count in range(max_retries):
+                try:
+                    number = await page.locator("text=上传中").count()
+                    if number == 0:
+                        kuaishou_logger.success(_msg("🥳", "图文素材已经传完啦"))
+                        break
 
-                if retry_count % 5 == 0:
-                    kuaishou_logger.info(_msg("🏃", "小人正在努力上传图文素材"))
+                    if retry_count % 5 == 0:
+                        kuaishou_logger.info(_msg("🏃", "小人正在努力上传图文素材"))
 
-                if await page.locator("text=上传失败").count():
-                    kuaishou_logger.warning(_msg("😵", "图文素材上传摔了一跤，小人马上重新上传"))
-                    await page.locator('div.progress-div [class^="upload-btn-input"]').set_input_files(self.image_paths)
+                    if await page.locator("text=上传失败").count():
+                        kuaishou_logger.warning(_msg("😵", "图文素材上传摔了一跤，小人马上重新上传"))
+                        await page.locator('div.progress-div [class^="upload-btn-input"]').set_input_files(self.image_paths)
 
-                await asyncio.sleep(2)
-            except Exception as exc:
-                kuaishou_logger.warning(_msg("😵", f"检查图文上传状态时出错，小人继续重试: {exc}"))
-                await asyncio.sleep(2)
-        else:
-            raise TimeoutError("等待快手图文素材上传完成超时，已停止发布")
+                    await asyncio.sleep(2)
+                except Exception as exc:
+                    kuaishou_logger.warning(_msg("😵", f"检查图文上传状态时出错，小人继续重试: {exc}"))
+                    await asyncio.sleep(2)
+            else:
+                raise TimeoutError("等待快手图文素材上传完成超时，已停止发布")
+        await publish_step(wait_for_image_upload)
 
-        await self.apply_original_declaration(page)
+        await publish_step(lambda: self.apply_original_declaration(page))
 
         if self.publish_strategy == KUAISHOU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
-            await self.set_schedule_time(page, self.publish_date)
+            await publish_step(lambda: self.set_schedule_time(page, self.publish_date))
 
-        emit_checkpoint("submitting")
-        await submit_kuaishou_publish_once(page)
+        await publish_step(lambda: submit_kuaishou_publish_once(page))
         kuaishou_logger.success(_msg("🥳", "图文发布成功，小人开心收工"))
         emit_result("scheduled" if self.publish_strategy == KUAISHOU_PUBLISH_STRATEGY_SCHEDULED else "published")
 
@@ -1090,11 +1107,12 @@ class KSNote(KSBaseUploader):
         page = None
         try:
             page = await context.new_page()
-            await page.goto(KUAISHOU_UPLOAD_URL)
-            kuaishou_logger.info(_msg("🧭", "小人正在赶往快手图文发布页"))
-            await page.wait_for_url(KUAISHOU_UPLOAD_URL_PATTERN)
+            async with publish_session(page, headed=not self.headless, platform="kuaishou"):
+                await publish_step(lambda: page.goto(KUAISHOU_UPLOAD_URL))
+                kuaishou_logger.info(_msg("🧭", "小人正在赶往快手图文发布页"))
+                await publish_step(lambda: page.wait_for_url(KUAISHOU_UPLOAD_URL_PATTERN))
 
-            await self.upload_note_content(page)
+                await self.upload_note_content(page)
             upload_success = True
         except Exception as exc:
             if page is not None:
