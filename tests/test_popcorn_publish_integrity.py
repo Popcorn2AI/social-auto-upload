@@ -136,6 +136,18 @@ class PopcornPublishIntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "写入校验"):
             asyncio.run(app.set_short_title(page, "标题", "视频号独立短标题"))
 
+    def test_tencent_click_timeout_does_not_send_a_second_submission(self):
+        app = TencentVideo("短标题内容", "/tmp/video.mp4", [], 0, "/tmp/cookie.json")
+        button = _locator()
+        button.click = AsyncMock(side_effect=TimeoutError("click result uncertain"))
+        button.evaluate = AsyncMock(side_effect=RuntimeError("duplicate click"))
+        page = MagicMock()
+        page.get_by_role.return_value = button
+        page.evaluate = AsyncMock(return_value=None)
+        with self.assertRaises(TimeoutError):
+            asyncio.run(app.submit_publish(page))
+        button.evaluate.assert_not_awaited()
+
     def test_tencent_login_redirect_is_not_publish_success(self):
         app = TencentVideo("短标题内容", "/tmp/video.mp4", [], 0, "/tmp/cookie.json")
         publish_button = _locator()

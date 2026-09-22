@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import sau_cli
-from uploader.ks_uploader.main import KSNote, KSVideo, build_kuaishou_publish_text
+from uploader.ks_uploader.main import KSNote, KSVideo, build_kuaishou_publish_text, submit_kuaishou_publish_once
 from uploader.tencent_uploader.main import TencentVideo, build_tencent_description_text
 
 
@@ -124,8 +124,10 @@ class PopcornKuaishouTencentContractTests(unittest.TestCase):
         kuaishou_note_source = inspect.getsource(KSNote.upload_note_content)
         tencent_source = inspect.getsource(TencentVideo.upload)
         for source in (kuaishou_video_source, kuaishou_note_source, tencent_source):
-            self.assertIn('emit_checkpoint("submitting")', source)
             self.assertIn("emit_result(", source)
+        # The checkpoint belongs immediately before the actual click, after preflight.
+        for submit in (submit_kuaishou_publish_once, TencentVideo.submit_publish):
+            self.assertIn('emit_checkpoint("submitting")', inspect.getsource(submit))
 
     def test_dispatch_propagates_compliance_without_implicit_defaults(self):
         with tempfile.TemporaryDirectory() as temp_dir:

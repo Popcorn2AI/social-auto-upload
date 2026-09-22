@@ -23,6 +23,7 @@ from utils.log import xiaohongshu_logger
 from utils.popcorn_diagnostics import capture_page_diagnostic
 from utils.popcorn_auth import observe_auth_page, emit_auth
 from utils.popcorn_events import emit_checkpoint, emit_result
+from utils.popcorn_publish_session import publish_session, publish_step, before_publish_submit
 
 XHS_DEFAULT_CREATOR_BASE_URL = "https://creator.xiaohongshu.com"
 XHS_CREATOR_BASE_URL_ENV = "SAU_XHS_CREATOR_BASE_URL"
@@ -916,60 +917,65 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
         publish_url = _build_xhs_creator_url(
             "/publish/publish?from=homepage&target=video"
         )
-        await page.goto(publish_url)
-        await page.wait_for_url(publish_url)
-        await page.locator("div[class^='upload-content'] input[class='upload-input']").set_input_files(self.file_path)
+        await publish_step(lambda: page.goto(publish_url))
+        await publish_step(lambda: page.wait_for_url(publish_url))
+        await publish_step(lambda: page.locator("div[class^='upload-content'] input[class='upload-input']").set_input_files(self.file_path))
 
-        for _attempt in range(300):
-            state = await page.evaluate("""
-                () => {
-                    const visible = e => !!(e.getClientRects().length);
-                    const headings = [...document.querySelectorAll('*')].filter(
-                        e => visible(e) && e.children.length === 0 &&
-                             e.textContent.trim() === '视频文件'
-                    );
-                    let region = headings[0];
-                    while (region && !/取消上传|重新上传|上传成功|上传完成/.test(region.innerText || '')) {
-                        region = region.parentElement;
+        async def wait_for_video_upload():
+            for _attempt in range(300):
+                state = await page.evaluate("""
+                    () => {
+                        const visible = e => !!(e.getClientRects().length);
+                        const headings = [...document.querySelectorAll('*')].filter(
+                            e => visible(e) && e.children.length === 0 &&
+                                 e.textContent.trim() === '视频文件'
+                        );
+                        let region = headings[0];
+                        while (region && !/取消上传|重新上传|上传成功|上传完成/.test(region.innerText || '')) {
+                            region = region.parentElement;
+                        }
+                        // Legacy layout: inspect only its upload preview, never the title editor.
+                        region = region || [...document.querySelectorAll('.preview-new')].find(visible);
+                        if (!region || region === document.body || region === document.documentElement) return 'unknown';
+                        const text = region.innerText || '';
+                        if (/上传失败|上传出错/.test(text)) return 'failed';
+                        if (/上传中|正在上传|转码中|处理中|解析中/.test(text)) return 'uploading';
+                        const percentages = [...text.matchAll(/(\\d+(?:\\.\\d+)?)\\s*%/g)];
+                        if (percentages.some(m => Number(m[1]) < 100)) return 'uploading';
+                        if (/上传成功|上传完成|重新上传|分辨率/.test(text) ||
+                            percentages.some(m => Number(m[1]) === 100)) return 'complete';
+                        return 'unknown';
                     }
-                    // Legacy layout: inspect only its upload preview, never the title editor.
-                    region = region || [...document.querySelectorAll('.preview-new')].find(visible);
-                    if (!region || region === document.body || region === document.documentElement) return 'unknown';
-                    const text = region.innerText || '';
-                    if (/上传失败|上传出错/.test(text)) return 'failed';
-                    if (/上传中|正在上传|转码中|处理中|解析中/.test(text)) return 'uploading';
-                    const percentages = [...text.matchAll(/(\\d+(?:\\.\\d+)?)\\s*%/g)];
-                    if (percentages.some(m => Number(m[1]) < 100)) return 'uploading';
-                    if (/上传成功|上传完成|重新上传|分辨率/.test(text) ||
-                        percentages.some(m => Number(m[1]) === 100)) return 'complete';
-                    return 'unknown';
-                }
-            """)
-            if state == "failed":
-                raise RuntimeError("小红书视频上传失败，已停止设置封面")
-            if state == "complete":
-                xiaohongshu_logger.success(_msg("🥳", "视频上传完成，开始编辑发布内容"))
-                break
-            await asyncio.sleep(2)
-        else:
-            raise TimeoutError("等待小红书视频上传完成超时，未开始设置封面")
+                """)
+                if state == "failed":
+                    raise RuntimeError("小红书视频上传失败，已停止设置封面")
+                if state == "complete":
+                    xiaohongshu_logger.success(_msg("🥳", "视频上传完成，开始编辑发布内容"))
+                    break
+                await asyncio.sleep(2)
+            else:
+                raise TimeoutError("等待小红书视频上传完成超时，未开始设置封面")
+        await publish_step(wait_for_video_upload)
 
         xiaohongshu_logger.info(_msg("✍️", "小人开始填标题、描述和话题"))
-        await self.fill_meta(page)
+        await publish_step(lambda: self.fill_meta(page))
 
-        await self.set_thumbnail(page, self.thumbnail_path)
+        await publish_step(lambda: self.set_thumbnail(page, self.thumbnail_path))
 
         # await self.set_location(page, "青岛市")
 
-        await self.check_original_declaration(page)
+        await publish_step(lambda: self.check_original_declaration(page))
 
         if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
-            await self.set_schedule_time_xiaohongshu(page, self.publish_date)
+            await publish_step(lambda: self.set_schedule_time_xiaohongshu(page, self.publish_date))
 
+        submit_label = "定时发布" if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED else "发布"
+        await publish_step(lambda: page.get_by_role("button", name=submit_label, exact=True).wait_for(state="visible", timeout=30000))
         submit_click_sent = False
         for _attempt in range(120):
             try:
                 if not submit_click_sent:
+                    await before_publish_submit()
                     emit_checkpoint("submitting")
                     if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED:
                         await page.locator('button:has-text("定时发布")').click()
@@ -1005,7 +1011,8 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
         page = None
         try:
             page = await context.new_page()
-            await self.upload_video_content(page)
+            async with publish_session(page, headed=not self.headless, platform="xiaohongshu"):
+                await self.upload_video_content(page)
             await context.storage_state(path=self.account_file)
             xiaohongshu_logger.success(_msg("🥳", "cookie 更新完毕"))
         except Exception as exc:
@@ -1079,41 +1086,46 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
         publish_url = _build_xhs_creator_url(
             "/publish/publish?from=homepage&target=image"
         )
-        await page.goto(publish_url)
-        await page.wait_for_url(publish_url)
+        await publish_step(lambda: page.goto(publish_url))
+        await publish_step(lambda: page.wait_for_url(publish_url))
 
         upload_input = page.locator('input[type="file"][accept*="image"]').first
         if not await upload_input.count():
             upload_input = page.locator("div[class^='upload-content'] input[class='upload-input']").first
 
-        await upload_input.wait_for(state="attached", timeout=30000)
+        await publish_step(lambda: upload_input.wait_for(state="attached", timeout=30000))
         xiaohongshu_logger.info(_msg("📤", "小人正在上传图片"))
-        await upload_input.set_input_files(self.image_paths)
+        await publish_step(lambda: upload_input.set_input_files(self.image_paths))
 
-        for _attempt in range(300):
-            try:
-                title_container = page.locator('input[placeholder*="填写标题"]').first
-                await title_container.wait_for(state="visible", timeout=3000)
-                xiaohongshu_logger.success(_msg("🥳", "图文素材已经传完，可以开始填写内容了"))
-                break
-            except Exception:
-                xiaohongshu_logger.debug(_msg("🧍", "图文素材还在上传，小人继续等一会"))
-                await asyncio.sleep(1)
-        else:
-            raise TimeoutError("等待小红书图文上传完成超时")
+        async def wait_for_image_upload():
+            for _attempt in range(300):
+                try:
+                    title_container = page.locator('input[placeholder*="填写标题"]').first
+                    await title_container.wait_for(state="visible", timeout=3000)
+                    xiaohongshu_logger.success(_msg("🥳", "图文素材已经传完，可以开始填写内容了"))
+                    break
+                except Exception:
+                    xiaohongshu_logger.debug(_msg("🧍", "图文素材还在上传，小人继续等一会"))
+                    await asyncio.sleep(1)
+            else:
+                raise TimeoutError("等待小红书图文上传完成超时")
+        await publish_step(wait_for_image_upload)
 
         xiaohongshu_logger.info(_msg("✍️", "小人开始填标题、描述和话题"))
-        await self.fill_meta(page)
+        await publish_step(lambda: self.fill_meta(page))
 
-        await self.check_original_declaration(page)
+        await publish_step(lambda: self.check_original_declaration(page))
 
         if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
-            await self.set_schedule_time_xiaohongshu(page, self.publish_date)
+            await publish_step(lambda: self.set_schedule_time_xiaohongshu(page, self.publish_date))
 
+        submit_label = "定时发布" if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED else "发布"
+        await publish_step(lambda: page.get_by_role("button", name=submit_label, exact=True).wait_for(state="visible", timeout=30000))
         submit_click_sent = False
         for _attempt in range(120):
             try:
                 if not submit_click_sent:
+                    await before_publish_submit()
                     emit_checkpoint("submitting")
                     if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED:
                         await page.locator('button:has-text("定时发布")').click()
@@ -1149,7 +1161,8 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
         page = None
         try:
             page = await context.new_page()
-            await self.upload_note_content(page)
+            async with publish_session(page, headed=not self.headless, platform="xiaohongshu"):
+                await self.upload_note_content(page)
             await context.storage_state(path=self.account_file)
             xiaohongshu_logger.success(_msg("🥳", "cookie 更新完毕"))
         except Exception as exc:
