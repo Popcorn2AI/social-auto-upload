@@ -121,6 +121,7 @@ class KuaishouVideoUploadRequest:
     headless: bool = True
     collection_name: str | None = None
     declare_original: bool = False
+    declaration: str = ""
 
 
 @dataclass(slots=True)
@@ -135,6 +136,7 @@ class KuaishouNoteUploadRequest:
     debug: bool = True
     headless: bool = True
     declare_original: bool = False
+    declaration: str = ""
 
 
 @dataclass(slots=True)
@@ -493,6 +495,7 @@ async def upload_kuaishou_video(request: KuaishouVideoUploadRequest) -> Path:
         headless=request.headless,
         collection_name=request.collection_name,
         declare_original=request.declare_original,
+        declaration=request.declaration,
     )
     await app.main()
     return account_file
@@ -517,6 +520,7 @@ async def upload_kuaishou_note(request: KuaishouNoteUploadRequest) -> Path:
         debug=request.debug,
         headless=request.headless,
         declare_original=request.declare_original,
+        declaration=request.declaration,
     )
     await app.main()
     return account_file
@@ -870,6 +874,7 @@ def build_parser() -> argparse.ArgumentParser:
     kuaishou_upload_video_parser.add_argument("--thumbnail", type=existing_file_path, help="Optional thumbnail path")
     kuaishou_upload_video_parser.add_argument("--collection", default=None, help="Optional collection name to add the work into (must already exist)")
     kuaishou_upload_video_parser.add_argument("--declare-original", action="store_true", help="Explicitly declare this work as original")
+    kuaishou_upload_video_parser.add_argument("--declaration", default="", help="Explicit author declaration")
     add_runtime_flags(kuaishou_upload_video_parser)
 
     kuaishou_upload_note_parser = kuaishou_actions.add_parser("upload-note", help="Upload one note to Kuaishou")
@@ -880,6 +885,7 @@ def build_parser() -> argparse.ArgumentParser:
     kuaishou_upload_note_parser.add_argument("--tags", default="", help="Comma-separated tags, such as tag1,tag2")
     kuaishou_upload_note_parser.add_argument("--schedule", type=schedule_value, help=f"Schedule time in {schedule_help}")
     kuaishou_upload_note_parser.add_argument("--declare-original", action="store_true", help="Explicitly declare this work as original")
+    kuaishou_upload_note_parser.add_argument("--declaration", default="", help="Explicit author declaration")
     add_runtime_flags(kuaishou_upload_note_parser)
 
     xiaohongshu_parser = platform_parsers.add_parser("xiaohongshu", help="Xiaohongshu operations")
@@ -1156,6 +1162,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 headless=args.headless,
                 collection_name=args.collection,
                 declare_original=args.declare_original,
+                declaration=args.declaration,
             )
             await upload_kuaishou_video(request)
             print(f"Kuaishou video upload submitted: {request.video_file}")
@@ -1173,6 +1180,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 debug=args.debug,
                 headless=args.headless,
                 declare_original=args.declare_original,
+                declaration=args.declaration,
             )
             await upload_kuaishou_note(request)
             print(f"Kuaishou note upload submitted: {len(request.image_files)} images")

@@ -194,6 +194,7 @@ class PopcornPublishIntegrityTests(unittest.TestCase):
     def test_kuaishou_schedule_readback_mismatch_blocks_publish(self):
         app = KSVideo("标题", "/tmp/video.mp4", [], 0, "/tmp/cookie.json")
         picker = _locator(value="2026-09-20 09:00:00")
+        picker.get_attribute = AsyncMock(return_value=None)
         page = MagicMock()
         page.locator.return_value = picker
         page.evaluate = AsyncMock(return_value=True)

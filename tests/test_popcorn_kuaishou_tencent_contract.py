@@ -11,6 +11,16 @@ from uploader.tencent_uploader.main import TencentVideo, build_tencent_descripti
 
 
 class PopcornKuaishouTencentContractTests(unittest.TestCase):
+    def test_kuaishou_cli_accepts_content_declaration_for_video_and_note(self):
+        with tempfile.TemporaryDirectory() as directory:
+            asset = Path(directory) / "asset.png"
+            asset.write_bytes(b"data")
+            parser = sau_cli.build_parser()
+            for action, flag in (("upload-video", "--file"), ("upload-note", "--images")):
+                args = parser.parse_args(["kuaishou", action, "--account", "main", flag, str(asset),
+                                          "--title", "title", "--declaration", "个人观点，仅供参考"])
+                self.assertEqual(args.declaration, "个人观点，仅供参考")
+
     def test_tencent_description_contains_intro_then_tags_without_repeating_title(self):
         self.assertEqual(
             build_tencent_description_text("作品简介", ["话题一", "#话题二"]),

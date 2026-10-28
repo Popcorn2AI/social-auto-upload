@@ -10,6 +10,7 @@ from patchright.async_api import async_playwright
 from uploader.douyin_uploader.main import DouYinVideo
 from uploader.tencent_uploader.main import TencentVideo
 from uploader.xiaohongshu_uploader.main import XiaoHongShuVideo
+from uploader.ks_uploader.main import KSNote, KSVideo
 
 
 class PublishEditorRoundtripTests(unittest.IsolatedAsyncioTestCase):
@@ -35,6 +36,66 @@ class PublishEditorRoundtripTests(unittest.IsolatedAsyncioTestCase):
         app = DouYinVideo("标题", "/tmp/video.mp4", [], 0, "/tmp/cookie.json")
         await app.set_schedule_time_douyin(self.page, datetime(2026, 9, 13, 18, 30))
         self.assertEqual(await self.page.locator('body').get_attribute('data-committed'), "2026-09-13 18:30")
+
+    async def test_kuaishou_replaces_default_date_and_commits_minutes(self):
+        await self.page.set_content('''<label class="ant-radio-wrapper">定时发布</label>
+        <input placeholder="选择日期时间" value="2026-10-27 20:46">
+        <script>const input=document.querySelector('input');
+        let typed=false;
+        input.addEventListener('beforeinput', () => { typed=true; });
+        input.addEventListener('keydown', e => { if(e.key==='Enter') {
+          input.value = typed && /^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}$/.test(input.value)
+            ? input.value : '2026-10-27 20:46';
+        }});</script>''')
+        app = KSVideo("标题", "/tmp/video.mp4", [], 0, "/tmp/cookie.json")
+        await app.set_schedule_time(self.page, datetime(2026, 10, 28, 21, 45))
+        self.assertEqual(await self.page.locator('input').input_value(), "2026-10-28 21:45")
+
+    async def test_kuaishou_readonly_picker_selects_calendar_hour_minute_and_confirms(self):
+        await self.page.set_content('''<label class="ant-radio-wrapper">定时发布</label>
+        <input readonly placeholder="选择日期时间" value="2026-10-27 22:25"
+          onclick="document.querySelector('.ant-picker-dropdown').style.display='block'">
+        <div class="ant-picker-dropdown" style="display:none">
+          <div class="ant-picker-header-view"><button class="ant-picker-year-btn">2026年</button><button class="ant-picker-month-btn">10月</button></div>
+          <table><tr><td class="ant-picker-cell ant-picker-cell-in-view" title="2026-10-28" onclick="window.day='2026-10-28'">28</td></tr></table>
+          <ul class="ant-picker-time-panel-column"><li class="ant-picker-time-panel-cell" onclick="window.hour='20'">20</li></ul>
+          <ul class="ant-picker-time-panel-column"><li class="ant-picker-time-panel-cell" onclick="window.minute='33'">33</li></ul>
+          <div class="ant-picker-ok"><button onclick="document.querySelector('input').value=window.day+' '+window.hour+':'+window.minute;this.closest('.ant-picker-dropdown').style.display='none'">确定</button></div>
+        </div>''')
+        app = KSVideo("标题", "/tmp/video.mp4", [], 0, "/tmp/cookie.json")
+        await app.set_schedule_time(self.page, datetime(2026, 10, 28, 20, 33))
+        self.assertEqual(await self.page.locator('input').input_value(), "2026-10-28 20:33")
+
+    async def test_kuaishou_readonly_picker_moves_to_next_month(self):
+        await self.page.set_content('''<label class="ant-radio-wrapper">定时发布</label>
+        <input readonly placeholder="选择日期时间" value="2026-10-27 22:25"
+          onclick="document.querySelector('.ant-picker-dropdown').style.display='block'">
+        <div class="ant-picker-dropdown" style="display:none">
+          <button class="ant-picker-year-btn">2026年</button><button class="ant-picker-month-btn">10月</button>
+          <button class="ant-picker-header-next-btn" onclick="document.querySelector('.ant-picker-month-btn').textContent='11月';document.querySelector('td').classList.add('ant-picker-cell-in-view')">下一月</button>
+          <table><tr><td class="ant-picker-cell" title="2026-11-01" onclick="window.day='2026-11-01'">1</td></tr></table>
+          <ul class="ant-picker-time-panel-column"><li onclick="window.hour='20'">20</li></ul>
+          <ul class="ant-picker-time-panel-column"><li onclick="window.minute='33'">33</li></ul>
+          <div class="ant-picker-ok"><button onclick="document.querySelector('input').value=window.day+' '+window.hour+':'+window.minute;this.closest('.ant-picker-dropdown').style.display='none'">确定</button></div>
+        </div>''')
+        app = KSVideo("标题", "/tmp/video.mp4", [], 0, "/tmp/cookie.json")
+        await app.set_schedule_time(self.page, datetime(2026, 11, 1, 20, 33))
+        self.assertEqual(await self.page.locator('input').input_value(), "2026-11-01 20:33")
+
+    async def test_kuaishou_content_declaration_selects_and_reads_back_exact_choice(self):
+        await self.page.set_content('''<label>作者声明</label>
+        <div class="ant-select"><div class="ant-select-selector"><span class="ant-select-selection-item">请选择</span></div></div>
+        <div class="ant-select-item-option" onclick="document.querySelector('.ant-select-selection-item').textContent=this.textContent">个人观点，仅供参考</div>''')
+        app = KSVideo("标题", "/tmp/video.mp4", [], 0, "/tmp/cookie.json", declaration="个人观点，仅供参考")
+        await app.apply_content_declaration(self.page)
+        self.assertEqual(await self.page.locator('.ant-select-selection-item').inner_text(), "个人观点，仅供参考")
+
+    async def test_kuaishou_note_blocks_when_declaration_option_is_missing(self):
+        await self.page.set_content('''<label>作者声明</label>
+        <div class="ant-select"><div class="ant-select-selector"><span class="ant-select-selection-item">请选择</span></div></div>''')
+        app = KSNote(["/tmp/cover.png"], "正文", [], 0, "/tmp/cookie.json", declaration="素材来源于网络")
+        with self.assertRaisesRegex(RuntimeError, "未找到选项 素材来源于网络"):
+            await app.apply_content_declaration(self.page)
 
     async def test_tencent_replaces_default_hour_and_commits_minutes(self):
         await self.page.set_content('''<label>定时</label><label>定时发布</label>

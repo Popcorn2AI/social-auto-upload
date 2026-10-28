@@ -38,6 +38,7 @@ KUAISHOU_COOKIE_INVALID_SELECTOR = "div.names div.container div.name:text('机�
 KUAISHOU_PUBLISH_STRATEGY_IMMEDIATE = "immediate"
 KUAISHOU_PUBLISH_STRATEGY_SCHEDULED = "scheduled"
 KUAISHOU_UPLOAD_TIMEOUT_SECONDS = 480
+KUAISHOU_COVER_MAX_BYTES = 5 * 1024 * 1024
 KUAISHOU_COVER_APPLY_TIMEOUT_SECONDS = 15
 KUAISHOU_COVER_APPLY_POLL_MS = 500
 
@@ -84,6 +85,8 @@ def kuaishou_thumbnail_upload_file(file_path: str | Path):
     path = Path(file_path).expanduser().resolve()
     content = path.read_bytes()
     if path.suffix.lower() == ".jpg" and content.startswith(b"\xff\xd8\xff"):
+        if len(content) > KUAISHOU_COVER_MAX_BYTES:
+            raise ValueError("快手封面超过 5 MB，请更换封面后重试")
         yield str(path)
         return
 
@@ -100,6 +103,8 @@ def kuaishou_thumbnail_upload_file(file_path: str | Path):
     )
     if not encoded:
         raise ValueError(f"快手封面转换失败，无法生成 JPG: {path}")
+    if jpeg.nbytes > KUAISHOU_COVER_MAX_BYTES:
+        raise ValueError("快手封面超过 5 MB，请更换封面后重试")
 
     temporary_path = None
     try:
@@ -556,7 +561,7 @@ class KSBaseUploader(BaseVideoUploader):
 
     async def set_schedule_time(self, page: Page, publish_date: datetime):
         kuaishou_logger.info(_msg("🕒", "小人准备设置定时发布时间"))
-        publish_date_str = publish_date.strftime("%Y-%m-%d %H:%M:%S")
+        publish_date_str = publish_date.strftime("%Y-%m-%d %H:%M")
 
         # 1. 切换到"定时发布"radio (用文本匹配更稳)
         await page.locator('label.ant-radio-wrapper').filter(has_text="定时发布").click()
@@ -566,33 +571,36 @@ class KSBaseUploader(BaseVideoUploader):
         await page.locator('input[placeholder="选择日期时间"]').click()
         await asyncio.sleep(1)
 
-        # 3. 用 React 兼容的方式直接设置 input 的 value
-        #    (ant-design DatePicker 是 controlled component, 必须用 native setter + bubbling event)
-        js_code = """
-        (newValue) => {
-            const input = document.querySelector('input[placeholder="选择日期时间"]');
-            if (!input) return false;
-            const nativeSetter = Object.getOwnPropertyDescriptor(
-                window.HTMLInputElement.prototype, 'value'
-            ).set;
-            nativeSetter.call(input, newValue);
-            input.dispatchEvent(new Event('input', { bubbles: true }));
-            input.dispatchEvent(new Event('change', { bubbles: true }));
-            return true;
-        }
-        """
-        ok = await page.evaluate(js_code, publish_date_str)
-        if not ok:
-            kuaishou_logger.error("❌ 找不到时间选择器输入框")
-            return
+        picker = page.locator('input[placeholder="选择日期时间"]')
+        if await picker.get_attribute("readonly") is None:
+            await picker.fill(publish_date_str)
+            await page.keyboard.press("Enter")
+        else:
+            panel = page.locator(".ant-picker-dropdown")
+            await panel.wait_for(state="visible", timeout=10000)
+            target_month = publish_date.year * 12 + publish_date.month
+            for _ in range(36):
+                year = int((await panel.locator(".ant-picker-year-btn").inner_text()).strip().rstrip("年"))
+                month = int((await panel.locator(".ant-picker-month-btn").inner_text()).strip().rstrip("月"))
+                current_month = year * 12 + month
+                if current_month == target_month:
+                    break
+                button = ".ant-picker-header-next-btn" if current_month < target_month else ".ant-picker-header-prev-btn"
+                await panel.locator(button).click(timeout=8000)
+            else:
+                raise RuntimeError("快手定时发布时间设置失败：无法定位目标月份")
+            day = panel.locator(f'td.ant-picker-cell-in-view[title="{publish_date:%Y-%m-%d}"]').first
+            if not await day.count() or "ant-picker-cell-disabled" in (await day.get_attribute("class") or ""):
+                raise RuntimeError("快手定时发布时间设置失败：目标日期不可选")
+            await day.click(timeout=8000)
+            columns = panel.locator(".ant-picker-time-panel-column")
+            for index, value in enumerate((publish_date.hour, publish_date.minute)):
+                option = columns.nth(index).get_by_text(f"{value:02d}", exact=True)
+                await option.click(timeout=8000)
+            await panel.locator(".ant-picker-ok button").click(timeout=8000)
 
-        await asyncio.sleep(1)
-        # 4. 按 Enter 确认
-        await page.keyboard.press("Enter")
         await asyncio.sleep(2)
-        actual = (
-            await page.locator('input[placeholder="选择日期时间"]').input_value()
-        ).strip()
+        actual = (await picker.input_value()).strip()
         if actual != publish_date_str:
             raise RuntimeError(
                 f"快手定时发布时间写入校验失败：期望 {publish_date_str}，实际 {actual or '空'}"
@@ -654,6 +662,25 @@ class KSBaseUploader(BaseVideoUploader):
         else:
             await asyncio.sleep(0.5)
 
+    async def apply_content_declaration(self, page: Page) -> None:
+        declaration = getattr(self, "declaration", "")
+        if not declaration:
+            return
+        label = page.locator('label:text-is("作者声明")').first
+        if not await label.count():
+            raise RuntimeError("快手内容声明设置失败：未找到作者声明入口")
+        trigger = label.locator("xpath=following-sibling::div[contains(@class,'ant-select')]").first
+        if not await trigger.count():
+            raise RuntimeError("快手内容声明设置失败：未找到声明选择框")
+        await trigger.locator(".ant-select-selector").click(timeout=8000)
+        option = page.locator("div.ant-select-item-option").get_by_text(declaration, exact=True).first
+        if not await option.count():
+            raise RuntimeError(f"快手内容声明设置失败：未找到选项 {declaration}")
+        await option.click(timeout=8000)
+        selected = (await trigger.locator(".ant-select-selection-item").inner_text()).strip()
+        if selected != declaration:
+            raise RuntimeError(f"快手内容声明回读失败：期望 {declaration}，实际 {selected or '空'}")
+
     async def apply_original_declaration(self, page: Page) -> None:
         """Apply the Kuaishou original declaration only when explicitly requested."""
         if not getattr(self, "declare_original", False):
@@ -694,6 +721,7 @@ class KSVideo(KSBaseUploader):
         desc: str | None = None,
         collection_name: str | None = None,
         declare_original: bool = False,
+        declaration: str = "",
     ):
         super().__init__(
             publish_date=publish_date,
@@ -709,6 +737,7 @@ class KSVideo(KSBaseUploader):
         self.desc = desc or ""
         self.collection_name = collection_name
         self.declare_original = declare_original
+        self.declaration = declaration
 
     async def apply_collection(self, page: Page) -> None:
         """在发布表单页选择"加入合集"下拉框（Ant Design Select，label 属性=合集名）。
@@ -831,6 +860,7 @@ class KSVideo(KSBaseUploader):
             await confirm_button.click(timeout=30000)
             await modal.wait_for(state="hidden", timeout=30000)
 
+        await page.wait_for_timeout(3000)
         await self._wait_for_thumbnail_applied(page, cover_card, previous_fingerprint)
         kuaishou_logger.success(_msg("🥳", "封面已在发布页生效"))
 
@@ -934,7 +964,7 @@ class KSVideo(KSBaseUploader):
                 await publish_step(lambda: self.set_thumbnail(page))
 
                 await publish_step(lambda: self.apply_collection(page))
-                await publish_step(lambda: self.apply_original_declaration(page))
+                await publish_step(lambda: self.apply_content_declaration(page))
 
                 if self.publish_strategy == KUAISHOU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
                     await publish_step(lambda: self.set_schedule_time(page, self.publish_date))
@@ -979,6 +1009,7 @@ class KSNote(KSBaseUploader):
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
         declare_original: bool = False,
+        declaration: str = "",
     ):
         super().__init__(
             publish_date=publish_date,
@@ -992,6 +1023,7 @@ class KSNote(KSBaseUploader):
         self.title = title or (self.note[:20] if self.note else "")
         self.tags = tags or []
         self.declare_original = declare_original
+        self.declaration = declaration
 
     async def validate_upload_args(self):
         await self.validate_base_args()
@@ -1076,7 +1108,7 @@ class KSNote(KSBaseUploader):
                 raise TimeoutError("等待快手图文素材上传完成超时，已停止发布")
         await publish_step(wait_for_image_upload)
 
-        await publish_step(lambda: self.apply_original_declaration(page))
+        await publish_step(lambda: self.apply_content_declaration(page))
 
         if self.publish_strategy == KUAISHOU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
             await publish_step(lambda: self.set_schedule_time(page, self.publish_date))
