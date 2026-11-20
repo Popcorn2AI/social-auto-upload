@@ -1,5 +1,6 @@
 """Browser binding for the publish-only human-control protocol."""
 import asyncio
+import http.client
 import json
 import os
 import uuid
@@ -17,13 +18,19 @@ _active = ContextVar('popcorn_publish_intervention', default=None)
 def publish_session_active():
     return _active.get() is not None
 
-_OBSERVER = r"""() => {
+_OBSERVER = r"""(requiresPermit = false) => {
   if (window.__popcornPublishObserver) return;
   window.__popcornPublishObserver = true;
+  let approved = !requiresPermit;
+  let requesting = false;
+  let replaying = null;
+  window.__popcornAllowAutomatedPublish = () => { approved = true; };
   document.addEventListener('click', event => {
     const button = event.target.closest('button,[role="button"]');
     const label = button?.innerText?.trim();
-    if (!['发布', '发表', '定时发布'].includes(label)) return;
+    const confirm = button?.matches('.ant-modal-confirm-centered button.ant-btn-primary');
+    if (!confirm && !['发布', '发表', '定时发布', '立即发布'].includes(label)) return;
+    if (button === replaying) return;
     if (button.hasAttribute('data-popcorn-submit-clicked')) {
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -35,6 +42,21 @@ _OBSERVER = r"""() => {
       : /立即|现在|实时/.test(selected) ? 'published' : null;
     const previous = JSON.parse(document.documentElement.getAttribute('data-popcorn-submit-click') || 'null');
     const click = {mode: mode || previous?.mode || null};
+    if (!approved) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (requesting || !event.isTrusted) return;
+      requesting = true;
+      void window.__popcornRequestPublishAdmission(click).then(allowed => {
+        if (!allowed || !button.isConnected) return;
+        approved = true;
+        button.setAttribute('data-popcorn-submit-clicked', 'true');
+        document.documentElement.setAttribute('data-popcorn-submit-click', JSON.stringify(click));
+        replaying = button;
+        try { button.click(); } finally { replaying = null; }
+      }).catch(() => {}).finally(() => { requesting = false; });
+      return;
+    }
     button.setAttribute('data-popcorn-submit-clicked', 'true');
     // DOM attributes are visible across Patchright's isolated evaluation worlds.
     document.documentElement.setAttribute('data-popcorn-submit-click', JSON.stringify(click));
@@ -44,11 +66,16 @@ _OBSERVER = r"""() => {
 
 
 class BrowserPublishSession:
-    def __init__(self, page, *, headed, platform, control_file):
+    def __init__(self, page, *, headed, platform, control_file, admission_url=None, admission_token=None):
         self.page = page
         self.platform = platform
         self.manual_click = None
         self.control_file = Path(control_file)
+        self.admission_url = admission_url
+        self.admission_token = admission_token
+        self.admission_lock = asyncio.Lock()
+        self.admission_granted = False
+        self.admission_denied = False
         self.interaction = PublishIntervention(
             headed=headed, emit=_emit, probe=self.probe, control=self.control,
             session_id=uuid.uuid4().hex,
@@ -61,11 +88,56 @@ class BrowserPublishSession:
             if not self.interaction.submitting:
                 self.manual_click = data
         await self.page.expose_function('__popcornPublishClicked', clicked)
-        await self.page.add_init_script(f'({_OBSERVER})()')
-        await self.page.evaluate(_OBSERVER)
+        if self.admission_url:
+            await self.page.expose_binding('__popcornRequestPublishAdmission', self.admit_manual_click)
+        observer = f'({_OBSERVER})({json.dumps(bool(self.admission_url))})'
+        await self.page.add_init_script(observer)
+        await self.page.evaluate(observer)
         if self.interaction.headed:
             # Headed pages are visible before a blocker is detected, including debug mode.
             _emit({'type': 'checkpoint', 'checkpoint': 'manual_control'})
+
+    async def request_admission(self):
+        endpoint = urlparse(self.admission_url)
+        if (endpoint.scheme != 'http' or endpoint.hostname != '127.0.0.1'
+                or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment
+                or endpoint.path != '/api/desktop/publish-admission' or not self.admission_token):
+            return False
+
+        def request():
+            connection = http.client.HTTPConnection('127.0.0.1', endpoint.port, timeout=2)
+            try:
+                connection.request('POST', endpoint.path, headers={'Authorization': f'Bearer {self.admission_token}'})
+                return connection.getresponse().status == 204
+            except (OSError, http.client.HTTPException):
+                return False
+            finally:
+                connection.close()
+
+        return await asyncio.to_thread(request)
+
+    async def acquire_admission(self):
+        if not self.admission_url:
+            return True
+        async with self.admission_lock:
+            if self.admission_granted or self.admission_denied:
+                return False
+            self.admission_granted = await self.request_admission()
+            if not self.admission_granted:
+                self.admission_denied = True
+                _emit({'type': 'publish_admission_rejected'})
+            return self.admission_granted
+
+    async def admit_manual_click(self, source, click):
+        allowed_host = {'douyin': 'creator.douyin.com', 'kuaishou': 'cp.kuaishou.com',
+                        'wechat_channels': 'channels.weixin.qq.com', 'xiaohongshu': 'creator.xiaohongshu.com'}
+        if source['frame'] != self.page.main_frame or urlparse(source['frame'].url).hostname != allowed_host.get(self.platform):
+            return False
+        if not await self.acquire_admission():
+            return False
+        self.manual_click = click
+        _emit({'type': 'checkpoint', 'checkpoint': 'submitting'})
+        return True
 
     async def control(self):
         try:
@@ -76,6 +148,8 @@ class BrowserPublishSession:
         return data
 
     async def probe(self):
+        if self.admission_denied:
+            raise RuntimeError('未取得发布提交许可')
         try:
             return await self._probe()
         except Exception as error:
@@ -150,15 +224,17 @@ class BrowserPublishSession:
     async def before_submit(self):
         if self.interaction.submitting:
             raise ManualPublishUncertain('已经尝试提交，发布结果待确认')
-        if not self.interaction.headed:
-            self.interaction.submitting = True
-            return
-        await self.interaction.check_result()
-        if self.manual_click is not None:
-            # No automatic submission after any human submit click, even if validation failed.
-            await self.interaction.wait_for_user('已检测到人工提交，正在核对平台结果')
+        if self.interaction.headed:
             await self.interaction.check_result()
-            raise ManualPublishUncertain('人工提交结果待确认')
+            if self.manual_click is not None:
+                # Once a human has submitted, only observe that attempt.
+                await self.interaction.wait_for_user('已检测到人工提交，正在核对平台结果')
+                await self.interaction.check_result()
+                raise ManualPublishUncertain('人工提交结果待确认')
+        if not await self.acquire_admission():
+            raise RuntimeError('未取得发布提交许可')
+        if self.admission_url and self.interaction.headed:
+            await self.page.evaluate("() => window.__popcornAllowAutomatedPublish()")
         self.interaction.submitting = True
 
 
@@ -168,7 +244,11 @@ async def publish_session(page, *, headed, platform):
     if not control_file:
         yield
         return
-    session = BrowserPublishSession(page, headed=headed, platform=platform, control_file=control_file)
+    session = BrowserPublishSession(
+        page, headed=headed, platform=platform, control_file=control_file,
+        admission_url=os.environ.get('POPCORN_SAU_PUBLISH_ADMISSION_URL'),
+        admission_token=os.environ.get('POPCORN_SAU_PUBLISH_ADMISSION_TOKEN'),
+    )
     await session.install()
     token = _active.set(session)
     try:
