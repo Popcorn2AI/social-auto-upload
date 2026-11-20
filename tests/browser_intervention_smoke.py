@@ -70,12 +70,54 @@ async def check(browser, case):
             await context.close()
 
 
+async def check_submit_admission(browser, allowed):
+    # The platform and local permission response are both controlled fixtures.
+    with tempfile.TemporaryDirectory() as directory:
+        context = await browser.new_context()
+        page = await context.new_page()
+        await page.route('**/*', lambda route: route.fulfill(status=200,
+            content_type='text/html; charset=utf-8',
+            body='<button onclick="this.dataset.count=(Number(this.dataset.count||0)+1).toString()">发布</button>'))
+        endpoint = 'https://creator.douyin.com/creator-micro/content/publish'
+        events = []
+        async def permission(_session):
+            return allowed
+        try:
+            with patch.dict(os.environ, {
+                'POPCORN_SAU_CONTROL_FILE': str(Path(directory) / 'control'),
+                'POPCORN_SAU_PUBLISH_ADMISSION_URL': 'http://127.0.0.1:4000/api/desktop/publish-admission',
+            }), patch('utils.popcorn_publish_session._emit', events.append), patch(
+                'utils.popcorn_publish_session.BrowserPublishSession.request_admission', permission,
+            ):
+                async with publish_session(page, headed=True, platform='douyin'):
+                    await page.goto(endpoint)
+                    button = page.get_by_role('button', name='发布')
+                    await button.click()
+                    if allowed:
+                        await page.wait_for_function("document.querySelector('button').dataset.count === '1'")
+                        await button.click()
+                        assert await button.get_attribute('data-count') == '1'
+                        assert {'type': 'checkpoint', 'checkpoint': 'submitting'} in events
+                    else:
+                        for _ in range(30):
+                            if {'type': 'publish_admission_rejected'} in events:
+                                break
+                            await asyncio.sleep(.05)
+                        assert {'type': 'publish_admission_rejected'} in events
+                        assert await button.get_attribute('data-count') is None
+            print(f'PASS real headed Chromium: publish permit allowed={allowed}', flush=True)
+        finally:
+            await context.close()
+
+
 async def main():
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=False, channel='chromium')
         try:
             for case in ('published', 'scheduled', 'continue'):
                 await asyncio.wait_for(check(browser, case), timeout=20)
+            for allowed in (False, True):
+                await asyncio.wait_for(check_submit_admission(browser, allowed), timeout=15)
         finally:
             await browser.close()
 

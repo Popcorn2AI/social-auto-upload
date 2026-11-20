@@ -1483,8 +1483,12 @@ async def dispatch(args: argparse.Namespace) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    requested = list(argv) if argv is not None else sys.argv[1:]
+    if requested == ["--popcorn-publish-admission"]:
+        print("popcorn-publish-admission/v1")
+        return 0
     parser = build_parser()
-    args = parser.parse_args(list(argv) if argv is not None else None)
+    args = parser.parse_args(requested)
     try:
         return asyncio.run(dispatch(args))
     except Exception as exc:

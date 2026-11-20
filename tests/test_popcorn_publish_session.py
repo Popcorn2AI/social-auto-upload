@@ -135,6 +135,25 @@ class PublishSessionTests(unittest.IsolatedAsyncioTestCase):
                 await before_publish_submit()
         page.evaluate.assert_not_awaited()
 
+    async def test_submit_denied_before_headless_click(self):
+        events = []
+        calls = []
+        admitted = AsyncMock(return_value=False)
+        with patch.dict(os.environ, {
+            'POPCORN_SAU_CONTROL_FILE': '/tmp/not-used',
+            'POPCORN_SAU_PUBLISH_ADMISSION_URL': 'http://127.0.0.1:4000/api/desktop/publish-admission',
+            'POPCORN_SAU_PUBLISH_ADMISSION_TOKEN': 'fixture',
+        }), patch('utils.popcorn_publish_session._emit', events.append), patch(
+            'utils.popcorn_publish_session.BrowserPublishSession.request_admission', admitted, create=True,
+        ):
+            with self.assertRaisesRegex(RuntimeError, '提交许可'):
+                async with publish_session(FakePage(), headed=False, platform='douyin'):
+                    await before_publish_submit()
+                    calls.append('click')
+        self.assertEqual(calls, [])
+        admitted.assert_awaited_once()
+        self.assertEqual(events, [{'type': 'publish_admission_rejected'}])
+
     async def test_without_control_contract_keeps_legacy_behavior(self):
         with patch.dict(os.environ, {'POPCORN_SAU_CONTROL_FILE': ''}):
             async with publish_session(FakePage(), headed=False, platform='douyin'):
